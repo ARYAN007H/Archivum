@@ -183,8 +183,15 @@ const NativeReader = ({ book, onClose, user }) => {
 
           // Strip inline styles/classes but keep semantic tags
           chapterDoc.body.querySelectorAll("*").forEach(el => {
-            el.removeAttribute("class");
+            const safeStyles = [];
+            if (el.style.textAlign) safeStyles.push(`text-align: ${el.style.textAlign}`);
+            if (el.style.fontStyle) safeStyles.push(`font-style: ${el.style.fontStyle}`);
+            if (el.style.fontWeight) safeStyles.push(`font-weight: ${el.style.fontWeight}`);
+            
             el.removeAttribute("style");
+            if (safeStyles.length > 0) {
+              el.setAttribute("style", safeStyles.join('; '));
+            }
           });
 
           finalHtml += `<div class="chapter-break"></div>${chapterDoc.body.innerHTML}`;
@@ -238,8 +245,16 @@ const NativeReader = ({ book, onClose, user }) => {
       }
       
       doc.body.querySelectorAll("*").forEach(el => {
-        el.removeAttribute("class");
+        const safeStyles = [];
+        if (el.style.textAlign) safeStyles.push(`text-align: ${el.style.textAlign}`);
+        if (el.style.fontStyle) safeStyles.push(`font-style: ${el.style.fontStyle}`);
+        if (el.style.fontWeight) safeStyles.push(`font-weight: ${el.style.fontWeight}`);
+        
         el.removeAttribute("style");
+        if (safeStyles.length > 0) {
+          el.setAttribute("style", safeStyles.join('; '));
+        }
+        // Keep classes so structural CSS rules (like .chapter) can be applied if needed.
       });
       
       htmlToInject.current = doc.body.innerHTML;
@@ -504,9 +519,9 @@ const NativeReader = ({ book, onClose, user }) => {
   const currentTheme = getThemeVars();
   
   // Column layout parameters — carefully tuned for book-like feel
-  const colWidth = spread ? '38vw' : '55vw';
-  const colGap = spread ? '14vw' : '45vw';
-  const padLeft = spread ? '5vw' : '22.5vw';
+  const colWidth = spread ? '40vw' : '80vw';
+  const colGap = spread ? '10vw' : '20vw';
+  const padLeft = spread ? '5vw' : '10vw';
 
   const handleMouseUp = (e) => {
     const sel = window.getSelection();
