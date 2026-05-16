@@ -220,6 +220,10 @@ function App() {
   const handleAuth = async (e) => {
     e.preventDefault();
     setAuthError('');
+    if (!supabase) {
+      setAuthError('Authentication service is not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.');
+      return;
+    }
     try {
       if (authMode === 'signup') {
         const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
@@ -236,6 +240,7 @@ function App() {
   };
 
   const handleLogout = async () => {
+    if (!supabase) return;
     await supabase.auth.signOut();
   };
 
@@ -456,13 +461,14 @@ function App() {
       {/* AUTH MODAL */}
       {showAuthModal && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(10px)' }}>
-          <div style={{ background: 'var(--bg-surface)', padding: '40px', border: '1px solid var(--border)', borderRadius: '4px', width: '100%', maxWidth: '400px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <div style={{ position: 'relative', background: 'var(--bg-surface)', padding: '40px', border: '1px solid var(--border)', borderRadius: '8px', width: '100%', maxWidth: '420px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <button onClick={() => setShowAuthModal(false)} style={{ position: 'absolute', top: '16px', right: '16px', fontSize: '24px', color: 'var(--text-secondary)' }}>&times;</button>
             <h3 className="display" style={{ fontSize: '24px', margin: 0 }}>{authMode === 'login' ? 'Sign In' : 'Create Account'}</h3>
             {authError && <div className="mono" style={{ color: 'var(--ember)', fontSize: '11px' }}>{authError}</div>}
             <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <input type="email" placeholder="Email" value={authEmail} onChange={e=>setAuthEmail(e.target.value)} required style={{ background: 'var(--bg-raised)', border: '1px solid var(--border)', padding: '12px', color: 'var(--text-primary)', outline: 'none' }} />
-              <input type="password" placeholder="Password" value={authPassword} onChange={e=>setAuthPassword(e.target.value)} required style={{ background: 'var(--bg-raised)', border: '1px solid var(--border)', padding: '12px', color: 'var(--text-primary)', outline: 'none' }} />
-              <button type="submit" className="btn-primary" style={{ padding: '12px' }}>{authMode === 'login' ? 'LOGIN' : 'SIGN UP'}</button>
+              <input className="auth-input" type="email" placeholder="Email" value={authEmail} onChange={e=>setAuthEmail(e.target.value)} required />
+              <input className="auth-input" type="password" placeholder="Password" value={authPassword} onChange={e=>setAuthPassword(e.target.value)} required />
+              <button type="submit" className="btn-primary" style={{ padding: '14px' }}>{authMode === 'login' ? 'LOGIN' : 'SIGN UP'}</button>
             </form>
             <div className="mono text-secondary" style={{ textAlign: 'center', fontSize: '11px' }}>
               {authMode === 'login' ? 'New here? ' : 'Already have an account? '}
@@ -470,7 +476,6 @@ function App() {
                 {authMode === 'login' ? 'Sign up' : 'Log in'}
               </button>
             </div>
-            <button onClick={() => setShowAuthModal(false)} style={{ position: 'absolute', top: '24px', right: '24px', color: 'var(--text-secondary)' }}>&times;</button>
           </div>
         </div>
       )}

@@ -1,15 +1,14 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { ArrowLeft, ArrowRight, Settings, Maximize, Columns, Square, BookmarkPlus, Edit3 } from 'lucide-react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { ArrowLeft, ArrowRight, Settings, Maximize, Columns, Square, BookmarkPlus, Edit3, X } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 
 const NativeReader = ({ book, onClose, user }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [fallbackLoading, setFallbackLoading] = useState(false);
   
   const [page, setPage] = useState(0);
   const [spread, setSpread] = useState(true);
-  const [fontSize, setFontSize] = useState(16);
+  const [fontSize, setFontSize] = useState(17);
   const [theme, setTheme] = useState('night');
   const [showSettings, setShowSettings] = useState(false);
   const [currentChapterTitle, setCurrentChapterTitle] = useState('');
@@ -34,12 +33,14 @@ const NativeReader = ({ book, onClose, user }) => {
       let savedHighlights = [];
       let savedBookmarks = [];
       if (user && supabase) {
-        const { data } = await supabase.from('reading_progress').select('*').eq('user_id', user.id).eq('book_id', book.id).single();
-        if (data) {
-          savedPage = data.current_page || 0;
-          savedHighlights = data.highlights || [];
-          savedBookmarks = data.bookmarks || [];
-        }
+        try {
+          const { data } = await supabase.from('reading_progress').select('*').eq('user_id', user.id).eq('book_id', book.id).single();
+          if (data) {
+            savedPage = data.current_page || 0;
+            savedHighlights = data.highlights || [];
+            savedBookmarks = data.bookmarks || [];
+          }
+        } catch(e) { /* no saved data yet */ }
       } else {
         savedPage = parseInt(localStorage.getItem(`archivum_progress_${book.id}`)) || 0;
         try { savedHighlights = JSON.parse(localStorage.getItem(`archivum_highlights_${book.id}`)) || []; } catch(e){}
@@ -59,7 +60,7 @@ const NativeReader = ({ book, onClose, user }) => {
 
       const epubUrl = book.formats['application/epub+zip'];
       if (!epubUrl) {
-        await loadFallback();
+        await loadFallback(savedHighlights);
         return;
       }
 
@@ -70,6 +71,7 @@ const NativeReader = ({ book, onClose, user }) => {
         const arrayBuffer = await res.arrayBuffer();
 
         const JSZip = window.JSZip;
+        if (!JSZip) throw new Error("JSZip not loaded");
         const zip = await JSZip.loadAsync(arrayBuffer);
 
         // Parse container.xml
@@ -98,8 +100,6 @@ const NativeReader = ({ book, onClose, user }) => {
 
         const itemrefs = Array.from(opfDoc.getElementsByTagName("*")).filter(el => el.localName === "itemref");
         const spineIds = itemrefs.map(itemref => itemref.getAttribute("idref"));
-        
-        let fullHtml = '';
 
         let finalHtml = '';
         for (const id of spineIds) {
@@ -135,7 +135,7 @@ const NativeReader = ({ book, onClose, user }) => {
               if (imgFile) {
                 const base64 = await imgFile.async("base64");
                 const ext = imgPath.split('.').pop().toLowerCase();
-                const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+                const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'svg' ? 'image/svg+xml' : 'image/jpeg';
                 img.setAttribute("src", `data:${mime};base64,${base64}`);
               }
             }
@@ -143,6 +143,7 @@ const NativeReader = ({ book, onClose, user }) => {
             img.removeAttribute("style");
           }
 
+          // Strip inline styles/classes but keep semantic tags
           chapterDoc.body.querySelectorAll("*").forEach(el => {
             el.removeAttribute("class");
             el.removeAttribute("style");
@@ -168,42 +169,99 @@ const NativeReader = ({ book, onClose, user }) => {
     return () => { isMounted = false; };
   }, [book, user]);
 
+  // Fallback: fetch plain text directly from Gutenberg
   const loadFallback = async (savedHighlights) => {
-    setFallbackLoading(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/book/${book.id}`);
-      if (!res.ok) throw new Error("Backend fallback failed");
-      const d = await res.json();
+      // Try to get plain text from Gutenberg
+      const textUrl = book.formats['text/plain; charset=utf-8'] 
+        || book.formats['text/plain'] 
+        || book.formats['text/plain; charset=us-ascii'];
       
+      if (!textUrl) {
+        setError("No readable format available for this book.");
+        setLoading(false);
+        return;
+      }
+
+      const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(textUrl)}`;
+      const res = await fetch(proxyUrl);
+      if (!res.ok) throw new Error("Text fetch failed");
+      const text = await res.text();
+
+      // Parse plain text into structured HTML
+      const lines = text.split('\n');
       let fullHtml = '';
-      d.chapters.forEach((ch, idx) => {
-        fullHtml += `<div class="chapter-break"></div>`;
-        fullHtml += `<h2 class="chapter-heading" data-title="${ch.title}" style="text-align:center;margin-top:40px;margin-bottom:60px;font-family:'Playfair Display',serif;font-size:2em;">${ch.title}</h2>`;
-        ch.paragraphs.forEach((p, i) => {
-          fullHtml += `<p style="text-indent:${i===0?'0':'2em'};text-align:justify;">${p}</p>`;
-        });
-      });
+      let currentParagraph = '';
+      let inParagraph = false;
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trimEnd();
+        const trimmed = line.trim();
+        
+        // Detect chapter/section headings (all caps lines, or lines starting with CHAPTER/BOOK)
+        if (trimmed.length > 0 && trimmed.length < 80 && 
+            (trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && !/^[0-9\s\.\-_]+$/.test(trimmed)) ||
+            /^(CHAPTER|BOOK|PART|SECTION|VOLUME)\b/i.test(trimmed)) {
+          // Flush current paragraph
+          if (currentParagraph.trim()) {
+            fullHtml += `<p>${currentParagraph.trim()}</p>`;
+            currentParagraph = '';
+          }
+          const tag = /^(CHAPTER|BOOK|PART|VOLUME)\b/i.test(trimmed) ? 'h2' : 'h3';
+          fullHtml += `<${tag}>${trimmed}</${tag}>`;
+          inParagraph = false;
+          continue;
+        }
+        
+        // Empty line = paragraph break
+        if (trimmed === '') {
+          if (currentParagraph.trim()) {
+            fullHtml += `<p>${currentParagraph.trim()}</p>`;
+            currentParagraph = '';
+          }
+          inParagraph = false;
+          continue;
+        }
+        
+        // Regular text line
+        if (currentParagraph) {
+          currentParagraph += ' ' + trimmed;
+        } else {
+          currentParagraph = trimmed;
+        }
+        inParagraph = true;
+      }
+      
+      // Flush remaining
+      if (currentParagraph.trim()) {
+        fullHtml += `<p>${currentParagraph.trim()}</p>`;
+      }
+
       htmlToInject.current = fullHtml;
-      highlightsToRestore.current = savedHighlights || highlights;
+      highlightsToRestore.current = savedHighlights || [];
+      setLoading(false);
     } catch(e) {
-      setError("Error loading book content. Please try again later.");
-    } finally {
-      setFallbackLoading(false);
+      console.error("Fallback error:", e);
+      setError("Unable to load this book. Please try another title.");
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (!loading && !fallbackLoading && contentRef.current && htmlToInject.current) {
+    if (!loading && contentRef.current && htmlToInject.current) {
       contentRef.current.innerHTML = htmlToInject.current;
       restoreHighlights(contentRef.current, highlightsToRestore.current);
-      setTimeout(calculatePages, 50);
+      
+      // Give the browser time to lay out columns before measuring
+      requestAnimationFrame(() => {
+        setTimeout(calculatePages, 100);
+      });
       
       // Clear refs to prevent re-injecting on other re-renders
       htmlToInject.current = '';
       highlightsToRestore.current = [];
     }
-  }, [loading, fallbackLoading]);
+  }, [loading]);
 
   const restoreHighlights = (container, savedHighlights) => {
     if (!savedHighlights || savedHighlights.length === 0) return;
@@ -223,14 +281,9 @@ const NativeReader = ({ book, onClose, user }) => {
         while (pos !== -1) {
           if (occurrenceCount === targetIndex) {
             const split1 = node.splitText(pos);
-            const split2 = split1.splitText(hlText.length);
+            split1.splitText(hlText.length);
             
             const mark = document.createElement('mark');
-            mark.style.backgroundColor = 'var(--gold)';
-            mark.style.color = '#111';
-            mark.style.borderRadius = '2px';
-            mark.style.padding = '0 2px';
-            
             mark.appendChild(split1.cloneNode(true));
             split1.parentNode.replaceChild(mark, split1);
             
@@ -246,15 +299,17 @@ const NativeReader = ({ book, onClose, user }) => {
 
   const saveData = async (newPage, newHighlights, newBookmarks) => {
     if (user && supabase) {
-      await supabase.from('reading_progress').upsert({
-        user_id: user.id,
-        book_id: book.id,
-        book_title: book.title,
-        current_page: newPage ?? page,
-        highlights: newHighlights ?? highlights,
-        bookmarks: newBookmarks ?? bookmarks,
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'user_id,book_id' });
+      try {
+        await supabase.from('reading_progress').upsert({
+          user_id: user.id,
+          book_id: book.id,
+          book_title: book.title,
+          current_page: newPage ?? page,
+          highlights: newHighlights ?? highlights,
+          bookmarks: newBookmarks ?? bookmarks,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id,book_id' });
+      } catch(e) { console.error('Save error:', e); }
     } else {
       if (newPage !== undefined) localStorage.setItem(`archivum_progress_${book.id}`, newPage);
       if (newHighlights !== undefined) localStorage.setItem(`archivum_highlights_${book.id}`, JSON.stringify(newHighlights));
@@ -262,21 +317,28 @@ const NativeReader = ({ book, onClose, user }) => {
     }
   };
 
-  const calculatePages = () => {
+  const calculatePages = useCallback(() => {
     if (contentRef.current) {
       const scrollWidth = contentRef.current.scrollWidth;
       const viewWidth = window.innerWidth;
-      const pages = Math.ceil(scrollWidth / viewWidth);
-      setTotalPages(pages || 1);
-      
-      setPage(p => Math.min(Math.max(p, 0), (pages || 1) - 1));
+      const pages = Math.max(1, Math.ceil(scrollWidth / viewWidth));
+      setTotalPages(pages);
+      setPage(p => Math.min(Math.max(p, 0), pages - 1));
     }
-  };
+  }, []);
+
+  // Recalculate pages when font size or spread mode changes
+  useEffect(() => {
+    if (!loading) {
+      const timer = setTimeout(calculatePages, 150);
+      return () => clearTimeout(timer);
+    }
+  }, [fontSize, spread, loading, calculatePages]);
 
   useEffect(() => {
     window.addEventListener('resize', calculatePages);
     return () => window.removeEventListener('resize', calculatePages);
-  }, [spread, fontSize]);
+  }, [calculatePages]);
 
   useEffect(() => {
     if (loading) return;
@@ -295,36 +357,44 @@ const NativeReader = ({ book, onClose, user }) => {
     return () => observer.disconnect();
   }, [loading, page, spread]);
 
-  const next = () => {
-    const newPage = Math.min(totalPages - 1, page + 1);
-    setPage(newPage);
-    saveData(newPage, undefined, undefined);
-  };
-  const prev = () => {
-    const newPage = Math.max(0, page - 1);
-    setPage(newPage);
-    saveData(newPage, undefined, undefined);
-  };
+  const next = useCallback(() => {
+    setPage(p => {
+      const newPage = Math.min(totalPages - 1, p + 1);
+      saveData(newPage, undefined, undefined);
+      return newPage;
+    });
+  }, [totalPages]);
+
+  const prev = useCallback(() => {
+    setPage(p => {
+      const newPage = Math.max(0, p - 1);
+      saveData(newPage, undefined, undefined);
+      return newPage;
+    });
+  }, []);
 
   useEffect(() => {
     const handleKey = (e) => {
       if(e.key === 'ArrowRight') next();
       if(e.key === 'ArrowLeft') prev();
+      if(e.key === 'Escape') onClose();
     };
     window.addEventListener('keyup', handleKey);
     return () => window.removeEventListener('keyup', handleKey);
-  });
+  }, [next, prev, onClose]);
 
   const getThemeVars = () => {
-    if (theme === 'night') return { bg: '#06060A', color: '#EDE8DF', accent: '#E04E2A' };
-    if (theme === 'sepia') return { bg: '#1A1209', color: '#D4B896', accent: '#BF9B5A' };
-    return { bg: '#F5F0E8', color: '#2C2416', accent: '#E04E2A' };
+    if (theme === 'night') return { bg: '#06060A', color: '#EDE8DF', accent: '#E04E2A', muted: 'rgba(255,255,255,0.08)' };
+    if (theme === 'sepia') return { bg: '#1A1209', color: '#D4B896', accent: '#BF9B5A', muted: 'rgba(255,255,255,0.06)' };
+    return { bg: '#F5F0E8', color: '#2C2416', accent: '#E04E2A', muted: 'rgba(0,0,0,0.06)' };
   };
 
   const currentTheme = getThemeVars();
-  const colWidth = spread ? '40vw' : '60vw';
-  const colGap = spread ? '10vw' : '40vw';
-  const paddingLeft = spread ? '5vw' : '20vw';
+  
+  // Column layout parameters — carefully tuned for book-like feel
+  const colWidth = spread ? '38vw' : '55vw';
+  const colGap = spread ? '14vw' : '45vw';
+  const padLeft = spread ? '5vw' : '22.5vw';
 
   const handleMouseUp = (e) => {
     const sel = window.getSelection();
@@ -371,16 +441,10 @@ const NativeReader = ({ book, onClose, user }) => {
     setHighlights(newHighlights);
     
     const mark = document.createElement('mark');
-    mark.style.backgroundColor = 'var(--gold)';
-    mark.style.color = '#111';
-    mark.style.borderRadius = '2px';
-    mark.style.padding = '0 2px';
     
-    // Fallback if range spans multiple elements
     try {
       range.surroundContents(mark);
     } catch(e) {
-      // If it fails to surround, extract contents and wrap (basic handling for complex selections)
       const fragment = range.extractContents();
       mark.appendChild(fragment);
       range.insertNode(mark);
@@ -403,24 +467,38 @@ const NativeReader = ({ book, onClose, user }) => {
     saveData(undefined, undefined, newBookmarks);
   };
 
-  if (loading || fallbackLoading) {
+  // Click on left/right third of page to navigate
+  const handlePageClick = (e) => {
+    // Don't navigate if text is selected
+    if (window.getSelection().toString().trim()) return;
+    const third = window.innerWidth / 3;
+    if (e.clientX < third) prev();
+    else if (e.clientX > third * 2) next();
+  };
+
+  // --- LOADING STATE ---
+  if (loading) {
     return (
-      <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: '#06060A', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '20px' }}>
-        <div className="mono text-secondary" style={{ animation: 'pulse 1.5s infinite' }}>
-          {fallbackLoading ? 'TYPESETTING PLAIN TEXT...' : 'PARSING EPUB...'}
+      <div className="reader-loading">
+        <div className="reader-loading-spinner"></div>
+        <div className="mono text-secondary reader-loading-text">
+          PARSING BOOK...
         </div>
       </div>
     );
   }
 
+  // --- ERROR STATE ---
   if (error) {
     return (
-      <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: '#06060A', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '20px' }}>
-        <div className="mono text-secondary">{error}</div>
-        <button className="btn-ghost" onClick={onClose}>CLOSE</button>
+      <div className="reader-loading">
+        <div className="mono text-secondary" style={{ maxWidth: '400px', textAlign: 'center', lineHeight: 1.6 }}>{error}</div>
+        <button className="btn-ghost" onClick={onClose} style={{ marginTop: '16px' }}>BACK TO LIBRARY</button>
       </div>
     );
   }
+
+  const progress = totalPages > 1 ? ((page / (totalPages - 1)) * 100).toFixed(0) : 100;
 
   return (
     <div 
@@ -429,134 +507,165 @@ const NativeReader = ({ book, onClose, user }) => {
         backgroundColor: currentTheme.bg,
         color: currentTheme.color,
         display: 'flex', flexDirection: 'column',
-        transition: 'background-color 0.4s ease',
+        transition: 'background-color 0.4s ease, color 0.4s ease',
         overflow: 'hidden'
       }}
     >
+      {/* Progress bar at very top */}
       <div style={{
-        position: 'absolute', top: 0, left: 0, right: 0, height: '60px',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 40px',
-        zIndex: 100, opacity: 0, transition: 'opacity 0.3s'
-      }} onMouseEnter={e => e.currentTarget.style.opacity = 1} onMouseLeave={e => e.currentTarget.style.opacity = 0}>
+        position: 'absolute', top: 0, left: 0, right: 0, height: '2px', zIndex: 200,
+        background: currentTheme.muted,
+      }}>
+        <div style={{
+          height: '100%',
+          width: `${progress}%`,
+          background: currentTheme.accent,
+          transition: 'width 0.5s ease',
+        }} />
+      </div>
+
+      {/* TOP BAR — auto-hide, shows on hover */}
+      <div className="reader-topbar">
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <button onClick={onClose} style={{ display: 'flex', alignItems: 'center', cursor: 'none' }}><ArrowLeft size={16} /></button>
-          <span className="mono" style={{ color: 'var(--text-secondary)' }}>BACK TO LIBRARY</span>
+          <button onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <ArrowLeft size={16} />
+            <span className="mono" style={{ color: 'inherit', opacity: 0.6 }}>LIBRARY</span>
+          </button>
         </div>
-        <div style={{ display: 'flex', gap: '24px' }}>
-          <button onClick={() => setSpread(!spread)} style={{ cursor: 'none' }}>
+        <div className="mono" style={{ opacity: 0.5, fontSize: '10px', maxWidth: '40%', textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {book.title}
+        </div>
+        <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
+          <button onClick={() => setSpread(!spread)} title={spread ? 'Single page' : 'Two-page spread'}>
             {spread ? <Square size={16} /> : <Columns size={16} />}
           </button>
-          <button onClick={() => setShowSettings(!showSettings)} style={{ cursor: 'none' }}>
+          <button onClick={() => setShowSettings(!showSettings)} title="Settings">
             <Settings size={16} />
           </button>
-          <button onClick={() => document.documentElement.requestFullscreen()} style={{ cursor: 'none' }}>
+          <button onClick={() => {
+            try { document.documentElement.requestFullscreen(); } catch(e) {}
+          }} title="Fullscreen">
             <Maximize size={16} />
           </button>
         </div>
       </div>
 
+      {/* SETTINGS PANEL */}
       {showSettings && (
-        <div style={{
-          position: 'absolute', top: '70px', right: '40px', background: currentTheme.bg,
-          padding: '24px', border: `1px solid ${theme==='night' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`, zIndex: 1001,
-          display: 'flex', flexDirection: 'column', gap: '16px', boxShadow: '0 10px 40px rgba(0,0,0,0.5)'
-        }}>
-          <div style={{ display: 'flex', gap: '12px' }}>
-            <button onClick={() => setTheme('night')} className="mono" style={{ color: theme==='night'?currentTheme.accent:'inherit' }}>NIGHT</button>
-            <button onClick={() => setTheme('sepia')} className="mono" style={{ color: theme==='sepia'?currentTheme.accent:'inherit' }}>SEPIA</button>
-            <button onClick={() => setTheme('paper')} className="mono" style={{ color: theme==='paper'?currentTheme.accent:'inherit' }}>PAPER</button>
+        <div className="reader-settings" style={{ background: currentTheme.bg }}>
+          <div className="mono" style={{ fontSize: '10px', opacity: 0.5, marginBottom: '4px' }}>THEME</div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {['night', 'sepia', 'paper'].map(t => (
+              <button 
+                key={t}
+                onClick={() => setTheme(t)} 
+                className="mono theme-btn" 
+                style={{ 
+                  color: theme === t ? currentTheme.accent : 'inherit',
+                  background: theme === t ? `${currentTheme.accent}15` : 'transparent',
+                  borderRadius: '4px'
+                }}
+              >
+                {t.toUpperCase()}
+              </button>
+            ))}
           </div>
-          <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-            <button onClick={() => setFontSize(f => Math.max(12, f - 2))} className="mono">A-</button>
-            <span className="mono">{fontSize}px</span>
-            <button onClick={() => setFontSize(f => Math.min(32, f + 2))} className="mono">A+</button>
+          <div style={{ height: '1px', background: currentTheme.muted }} />
+          <div className="mono" style={{ fontSize: '10px', opacity: 0.5, marginBottom: '4px' }}>FONT SIZE</div>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            <button onClick={() => setFontSize(f => Math.max(12, f - 1))} className="mono font-btn">A−</button>
+            <span className="mono" style={{ minWidth: '40px', textAlign: 'center' }}>{fontSize}PX</span>
+            <button onClick={() => setFontSize(f => Math.min(28, f + 1))} className="mono font-btn">A+</button>
           </div>
         </div>
       )}
 
+      {/* SELECTION MENU */}
       {selectionMenu && (
-        <div style={{
-          position: 'absolute',
-          left: selectionMenu.x,
-          top: selectionMenu.y,
-          transform: 'translate(-50%, -100%)',
-          background: 'var(--bg-surface)',
-          border: '1px solid var(--border)',
-          padding: '8px',
-          borderRadius: '4px',
-          display: 'flex',
-          gap: '12px',
-          zIndex: 2000,
-          boxShadow: '0 10px 20px rgba(0,0,0,0.5)'
-        }}>
-          <button onClick={handleHighlight} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: 'var(--text-primary)' }} className="mono"><Edit3 size={12}/> HIGHLIGHT</button>
+        <div className="selection-menu" style={{ left: selectionMenu.x, top: selectionMenu.y }}>
+          <button onClick={handleHighlight} className="mono">
+            <Edit3 size={12}/> HIGHLIGHT
+          </button>
           <div style={{ width: '1px', background: 'var(--border)' }}></div>
-          <button onClick={handleBookmark} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: 'var(--text-primary)' }} className="mono"><BookmarkPlus size={12}/> BOOKMARK</button>
+          <button onClick={handleBookmark} className="mono">
+            <BookmarkPlus size={12}/> BOOKMARK
+          </button>
         </div>
       )}
 
-      <div style={{ flex: 1, position: 'relative' }} onMouseUp={handleMouseUp}>
+      {/* MAIN READING AREA */}
+      <div style={{ flex: 1, position: 'relative' }} onMouseUp={handleMouseUp} onClick={handlePageClick}>
         
+        {/* Chapter headers for spread */}
         {spread ? (
           <>
-            <div style={{ position: 'absolute', top: '40px', left: '5vw', width: '40vw', textAlign: 'center', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.15em', opacity: 0.4, fontFamily: 'JetBrains Mono', zIndex: 10, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {book.title}
+            <div className="page-number" style={{ top: '40px', bottom: 'auto', left: '5vw', width: '38vw', fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {book.title.length > 40 ? book.title.substring(0, 40) + '…' : book.title}
             </div>
-            <div style={{ position: 'absolute', top: '40px', right: '5vw', width: '40vw', textAlign: 'center', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.15em', opacity: 0.4, fontFamily: 'JetBrains Mono', zIndex: 10, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <div className="page-number" style={{ top: '40px', bottom: 'auto', right: '5vw', width: '38vw', fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {currentChapterTitle || book.title}
             </div>
           </>
         ) : (
-          <div style={{ position: 'absolute', top: '40px', left: 0, right: 0, textAlign: 'center', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.15em', opacity: 0.4, fontFamily: 'JetBrains Mono', zIndex: 10, padding: '0 20vw', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <div className="page-number" style={{ top: '40px', bottom: 'auto', left: 0, right: 0, fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '0 20vw' }}>
             {currentChapterTitle || book.title}
           </div>
         )}
 
-        <button onClick={prev} style={{ position: 'absolute', left: '1vw', top: '50%', transform: 'translateY(-50%)', zIndex: 20, padding: '20px', opacity: 0, cursor: 'none', transition: 'opacity 0.2s' }} onMouseEnter={e=>e.currentTarget.style.opacity=0.3} onMouseLeave={e=>e.currentTarget.style.opacity=0}>
-          <ArrowLeft size={32} />
+        {/* Left arrow */}
+        <button className="nav-arrow" onClick={(e) => { e.stopPropagation(); prev(); }} style={{ left: '1vw' }}
+          onMouseEnter={e=>e.currentTarget.style.opacity=0.3} onMouseLeave={e=>e.currentTarget.style.opacity=0}>
+          <ArrowLeft size={28} />
         </button>
 
+        {/* BOOK CONTENT — CSS multi-column layout */}
         <div style={{
           width: '100vw', height: '100vh', 
           overflow: 'hidden', position: 'relative',
         }}>
+          {/* Spine shadow for spread mode */}
+          {spread && <div className="spread-spine" />}
+          
           <div 
             ref={contentRef}
+            className="reader-content"
             style={{
               height: 'calc(100vh - 140px)',
-              marginTop: '80px',
+              marginTop: '70px',
               width: 'max-content',
               columnWidth: colWidth,
               columnGap: colGap,
               columnFill: 'auto',
-              paddingLeft: paddingLeft,
-              paddingRight: paddingLeft,
+              paddingLeft: padLeft,
+              paddingRight: padLeft,
               transform: `translateX(-${page * 100}vw)`,
-              transition: loading ? 'none' : 'transform 0.5s cubic-bezier(0.22, 1, 0.36, 1)',
-              fontFamily: "'Libre Baskerville', Georgia, serif",
+              transition: 'transform 0.5s cubic-bezier(0.22, 1, 0.36, 1)',
               fontSize: `${fontSize}px`,
-              lineHeight: 1.8
+              color: currentTheme.color,
             }}
           >
           </div>
         </div>
 
-        <button onClick={next} style={{ position: 'absolute', right: '1vw', top: '50%', transform: 'translateY(-50%)', zIndex: 20, padding: '20px', opacity: 0, cursor: 'none', transition: 'opacity 0.2s' }} onMouseEnter={e=>e.currentTarget.style.opacity=0.3} onMouseLeave={e=>e.currentTarget.style.opacity=0}>
-          <ArrowRight size={32} />
+        {/* Right arrow */}
+        <button className="nav-arrow" onClick={(e) => { e.stopPropagation(); next(); }} style={{ right: '1vw' }}
+          onMouseEnter={e=>e.currentTarget.style.opacity=0.3} onMouseLeave={e=>e.currentTarget.style.opacity=0}>
+          <ArrowRight size={28} />
         </button>
 
+        {/* Page numbers */}
         {spread ? (
           <>
-            <div style={{ position: 'absolute', bottom: '30px', left: '5vw', width: '40vw', textAlign: 'center', fontSize: '11px', opacity: 0.4, fontFamily: 'JetBrains Mono', zIndex: 10 }}>
+            <div className="page-number" style={{ left: '5vw', width: '38vw' }}>
               {page * 2 + 1}
             </div>
-            <div style={{ position: 'absolute', bottom: '30px', right: '5vw', width: '40vw', textAlign: 'center', fontSize: '11px', opacity: 0.4, fontFamily: 'JetBrains Mono', zIndex: 10 }}>
-              {page * 2 + 2}
+            <div className="page-number" style={{ right: '5vw', width: '38vw' }}>
+              {Math.min(page * 2 + 2, totalPages * 2)}
             </div>
           </>
         ) : (
-          <div style={{ position: 'absolute', bottom: '30px', left: 0, right: 0, textAlign: 'center', fontSize: '11px', opacity: 0.4, fontFamily: 'JetBrains Mono', zIndex: 10 }}>
-            {page + 1}
+          <div className="page-number" style={{ left: 0, right: 0 }}>
+            {page + 1} / {totalPages}
           </div>
         )}
 

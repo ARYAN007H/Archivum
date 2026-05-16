@@ -412,6 +412,16 @@ button {
   color: var(--text-muted);
 }
 
+/* Override browser autofill yellow background */
+.auth-input:-webkit-autofill,
+.auth-input:-webkit-autofill:hover,
+.auth-input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 30px var(--bg-raised) inset !important;
+  -webkit-text-fill-color: var(--text-primary) !important;
+  border-color: var(--ember) !important;
+  caret-color: var(--text-primary);
+}
+
 /* ======================== */
 /* LOADER                   */
 /* ======================== */
