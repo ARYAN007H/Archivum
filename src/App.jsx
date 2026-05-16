@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NativeReader from './components/NativeReader';
-import { Search, ChevronDown, User } from 'lucide-react';
+import { Search, ChevronDown, User, Library } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
 const generateCover = (title, author, id) => {
@@ -52,6 +52,11 @@ function App() {
   const [selectedBook, setSelectedBook] = useState(null);
   const [readerOpen, setReaderOpen] = useState(false);
   const [navVisible, setNavVisible] = useState(false);
+
+  // Library State
+  const [view, setView] = useState('catalog'); // 'catalog' | 'library'
+  const [libraryBooks, setLibraryBooks] = useState([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
 
   // Auth State
   const [user, setUser] = useState(null);
@@ -164,6 +169,43 @@ function App() {
     }
   }, [loading, hasMore, page, query, genre]);
 
+  const fetchLibrary = useCallback(async () => {
+    setLibraryLoading(true);
+    let ids = [];
+    if (user && supabase) {
+      try {
+        const { data } = await supabase.from('reading_progress').select('book_id').eq('user_id', user.id);
+        if (data) ids = data.map(d => d.book_id);
+      } catch (e) { console.error(e); }
+    } else {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key.startsWith('archivum_progress_')) {
+          ids.push(key.replace('archivum_progress_', ''));
+        }
+      }
+    }
+    
+    ids = [...new Set(ids)]; // deduplicate
+    
+    if (ids.length === 0) {
+      setLibraryBooks([]);
+      setLibraryLoading(false);
+      return;
+    }
+    
+    try {
+      const res = await fetch(`https://gutendex.com/books?ids=${ids.join(',')}`);
+      const data = await res.json();
+      setLibraryBooks(data.results);
+    } catch(e) { console.error(e); }
+    setLibraryLoading(false);
+  }, [user]);
+
+  useEffect(() => {
+    if (view === 'library') fetchLibrary();
+  }, [view, fetchLibrary]);
+
   useEffect(() => {
     const delayDebounce = setTimeout(() => {
       fetchBooks(false);
@@ -275,22 +317,30 @@ function App() {
           />
         </div>
         <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
-          <div style={{ display: 'flex', gap: '8px', marginRight: '16px' }}>
-            {['', 'fiction', 'drama', 'poetry', 'philosophy'].map(g => (
-              <button 
-                key={g} 
-                onClick={() => setGenre(g)}
-                style={{
-                  padding: '6px 12px', borderRadius: '20px', fontFamily: 'JetBrains Mono', fontSize: '10px',
-                  color: genre === g ? '#fff' : 'var(--text-secondary)',
-                  background: genre === g ? 'var(--ember)' : 'transparent',
-                  transition: 'background 0.3s, color 0.3s'
-                }}
-              >
-                {g ? g.toUpperCase() : 'ALL'}
-              </button>
-            ))}
+          
+          <div style={{ display: 'flex', gap: '16px', alignItems: 'center', marginRight: '16px' }}>
+            <button className="mono" onClick={() => { setView('catalog'); window.scrollTo(0,0); }} style={{ opacity: view === 'catalog' ? 1 : 0.5, borderBottom: view === 'catalog' ? '1px solid var(--gold)' : 'none' }}>CATALOG</button>
+            <button className="mono" onClick={() => setView('library')} style={{ opacity: view === 'library' ? 1 : 0.5, borderBottom: view === 'library' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><Library size={14}/> MY LIBRARY</button>
           </div>
+
+          {view === 'catalog' && (
+            <div style={{ display: 'flex', gap: '8px', marginRight: '16px' }}>
+              {['', 'fiction', 'drama', 'poetry', 'philosophy'].map(g => (
+                <button 
+                  key={g} 
+                  onClick={() => setGenre(g)}
+                  style={{
+                    padding: '6px 12px', borderRadius: '20px', fontFamily: 'JetBrains Mono', fontSize: '10px',
+                    color: genre === g ? '#fff' : 'var(--text-secondary)',
+                    background: genre === g ? 'var(--ember)' : 'transparent',
+                    transition: 'background 0.3s, color 0.3s'
+                  }}
+                >
+                  {g ? g.toUpperCase() : 'ALL'}
+                </button>
+              ))}
+            </div>
+          )}
           {user ? (
             <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '11px', color: 'var(--text-secondary)' }}>
               <span>{user.email}</span>
@@ -304,49 +354,64 @@ function App() {
         </div>
       </header>
 
-      {/* HERO */}
-      <section id="hero" style={{ position: 'relative', height: '100vh', overflow: 'hidden', display: 'flex', alignItems: 'center' }}>
-        <div style={{
-          position: 'absolute', inset: 0,
-          backgroundImage: 'linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)',
-          backgroundSize: '60px 60px', zIndex: 1, pointerEvents: 'none'
-        }} />
-        <div style={{ position: 'absolute', inset: 0, zIndex: 2, pointerEvents: 'none' }}>
-          <div className="display" style={{ position: 'absolute', right: '-5vw', top: '10vh', fontSize: '25vw', opacity: 0.06, color: 'var(--text-muted)', lineHeight: 1 }}>70,000</div>
-          <div className="mono" style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%) rotate(-90deg)', color: 'var(--text-secondary)', transformOrigin: 'left center' }}>EST. 1971 — PROJECT GUTENBERG</div>
-        </div>
-        <div style={{ position: 'relative', zIndex: 3, paddingLeft: '15vw', width: '100%' }}>
-          <span className="mono" style={{ color: 'var(--ember)' }}>// THE FREE LIBRARY</span>
-          <h1 className="display" style={{ fontSize: 'clamp(3rem, 8vw, 9rem)', lineHeight: 0.95, margin: '20px 0' }}>
-            Seventy<br />
-            <em style={{ marginLeft: '8%' }}>Thousand</em><br />
-            Stories.
-          </h1>
-          <p className="body-text" style={{ fontSize: '18px', color: 'var(--text-secondary)', maxWidth: '400px', marginBottom: '40px' }}>
-            Every great book ever written. Free. Beautiful. Yours.
-          </p>
-          <div style={{ display: 'flex', gap: '16px' }}>
-            <button className="btn-primary" onClick={() => window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}>EXPLORE THE CATALOG &rarr;</button>
+      {/* HERO - Only show in catalog view */}
+      {view === 'catalog' && (
+        <section id="hero" style={{ position: 'relative', height: '100vh', overflow: 'hidden', display: 'flex', alignItems: 'center' }}>
+          <div style={{
+            position: 'absolute', inset: 0,
+            backgroundImage: 'linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)',
+            backgroundSize: '60px 60px', zIndex: 1, pointerEvents: 'none'
+          }} />
+          <div style={{ position: 'absolute', inset: 0, zIndex: 2, pointerEvents: 'none' }}>
+            <div className="display" style={{ position: 'absolute', right: '-5vw', top: '10vh', fontSize: '25vw', opacity: 0.06, color: 'var(--text-muted)', lineHeight: 1 }}>70,000</div>
+            <div className="mono" style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%) rotate(-90deg)', color: 'var(--text-secondary)', transformOrigin: 'left center' }}>EST. 1971 — PROJECT GUTENBERG</div>
           </div>
-          <div style={{ position: 'absolute', bottom: '40px', right: '40px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', opacity: 0.5 }}>
-            <ChevronDown size={20} className="bounce" />
-            <span className="mono">SCROLL</span>
+          <div style={{ position: 'relative', zIndex: 3, paddingLeft: '15vw', width: '100%' }}>
+            <span className="mono" style={{ color: 'var(--ember)' }}>// THE FREE LIBRARY</span>
+            <h1 className="display" style={{ fontSize: 'clamp(3rem, 8vw, 9rem)', lineHeight: 0.95, margin: '20px 0' }}>
+              Seventy<br />
+              <em style={{ marginLeft: '8%' }}>Thousand</em><br />
+              Stories.
+            </h1>
+            <p className="body-text" style={{ fontSize: '18px', color: 'var(--text-secondary)', maxWidth: '400px', marginBottom: '40px' }}>
+              Every great book ever written. Free. Beautiful. Yours.
+            </p>
+            <div style={{ display: 'flex', gap: '16px' }}>
+              <button className="btn-primary" onClick={() => window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}>EXPLORE THE CATALOG &rarr;</button>
+            </div>
+            <div style={{ position: 'absolute', bottom: '40px', right: '40px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', opacity: 0.5 }}>
+              <ChevronDown size={20} className="bounce" />
+              <span className="mono">SCROLL</span>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
-      {/* CATALOG */}
-      <section id="catalog" style={{ padding: '80px 5vw', minHeight: '100vh', position: 'relative' }}>
+      {/* MAIN VIEW */}
+      <section id="main-view" style={{ padding: '80px 5vw', minHeight: '100vh', position: 'relative', marginTop: view === 'library' ? '80px' : '0' }}>
         <div style={{ marginBottom: '60px' }}>
-          <span className="mono">01 — CATALOG</span>
-          <h2 className="display" style={{ fontSize: 'clamp(2rem, 4vw, 3.5rem)', margin: '8px 0' }}>The Archive</h2>
-          <span className="mono text-secondary">Showing {books.length} works</span>
+          <span className="mono">{view === 'catalog' ? '01 — CATALOG' : '02 — MY LIBRARY'}</span>
+          <h2 className="display" style={{ fontSize: 'clamp(2rem, 4vw, 3.5rem)', margin: '8px 0' }}>{view === 'catalog' ? 'The Archive' : 'Continue Reading'}</h2>
+          <span className="mono text-secondary">
+            {view === 'catalog' ? `Showing ${books.length} works` : `${libraryBooks.length} books in progress`}
+          </span>
         </div>
+        
+        {view === 'library' && libraryLoading && (
+          <div className="mono text-secondary" style={{ textAlign: 'center', padding: '40px' }}>Loading library...</div>
+        )}
+
+        {view === 'library' && !libraryLoading && libraryBooks.length === 0 && (
+          <div className="mono text-secondary" style={{ textAlign: 'center', padding: '80px 20px', border: '1px dashed var(--border)', borderRadius: '8px' }}>
+            YOUR LIBRARY IS EMPTY.<br/><br/>
+            START READING A BOOK FROM THE CATALOG TO ADD IT HERE.
+          </div>
+        )}
         
         <div style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '24px'
         }}>
-          {books.map(book => {
+          {(view === 'catalog' ? books : libraryBooks).map(book => {
             let authorName = book.authors?.[0]?.name || 'Unknown';
             let coverUrl = book.formats['image/jpeg'] || generateCover(book.title, authorName, book.id);
             
@@ -395,9 +460,12 @@ function App() {
             )
           })}
         </div>
-        <div ref={loaderRef} style={{ textAlign: 'center', padding: '40px', display: loading ? 'block' : 'none' }} className="mono text-secondary">
-          Loading more...
-        </div>
+        
+        {view === 'catalog' && (
+          <div ref={loaderRef} style={{ textAlign: 'center', padding: '40px', display: loading ? 'block' : 'none' }} className="mono text-secondary">
+            Loading more...
+          </div>
+        )}
       </section>
 
       {/* BOOK DETAIL PANEL */}

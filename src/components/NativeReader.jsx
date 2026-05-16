@@ -1,6 +1,32 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { ArrowLeft, ArrowRight, Settings, Maximize, Columns, Square, BookmarkPlus, Edit3, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Settings, Maximize, Columns, Square, BookmarkPlus, Edit3, X, List, Search, ChevronUp, ChevronDown, Play, Square as SquareIcon, Volume2 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
+
+// Multi-proxy fetcher — tries direct, then multiple CORS proxies
+const fetchWithProxy = async (url, responseType = 'text') => {
+  const proxies = [
+    (u) => u, // try direct first
+    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+  ];
+  
+  for (const makeUrl of proxies) {
+    try {
+      const proxyUrl = makeUrl(url);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(proxyUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) continue;
+      if (responseType === 'arraybuffer') return await res.arrayBuffer();
+      return await res.text();
+    } catch (e) {
+      continue; // try next proxy
+    }
+  }
+  throw new Error(`All proxies failed for: ${url}`);
+};
 
 const NativeReader = ({ book, onClose, user }) => {
   const [loading, setLoading] = useState(true);
@@ -11,7 +37,22 @@ const NativeReader = ({ book, onClose, user }) => {
   const [fontSize, setFontSize] = useState(17);
   const [theme, setTheme] = useState('night');
   const [showSettings, setShowSettings] = useState(false);
+  const [showToc, setShowToc] = useState(false);
+  const [tocItems, setTocItems] = useState([]);
   const [currentChapterTitle, setCurrentChapterTitle] = useState('');
+  const [turnDirection, setTurnDirection] = useState('');
+  
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [currentSearchIndex, setCurrentSearchIndex] = useState(-1);
+
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [sessionTime, setSessionTime] = useState(0);
+
+  const sessionStartTime = useRef(Date.now());
+  const touchStartX = useRef(0);
+  const touchEndX = useRef(0);
 
   const contentRef = useRef(null);
   const htmlToInject = useRef('');
@@ -60,15 +101,12 @@ const NativeReader = ({ book, onClose, user }) => {
 
       const epubUrl = book.formats['application/epub+zip'];
       if (!epubUrl) {
-        await loadFallback(savedHighlights);
+        await loadHtmlTier(savedHighlights);
         return;
       }
 
       try {
-        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(epubUrl)}`;
-        const res = await fetch(proxyUrl);
-        if (!res.ok) throw new Error("Fetch failed");
-        const arrayBuffer = await res.arrayBuffer();
+        const arrayBuffer = await fetchWithProxy(epubUrl, 'arraybuffer');
 
         const JSZip = window.JSZip;
         if (!JSZip) throw new Error("JSZip not loaded");
@@ -160,17 +198,62 @@ const NativeReader = ({ book, onClose, user }) => {
 
       } catch (err) {
         console.error("EPUB Parse Error:", err);
-        if (isMounted) await loadFallback(savedHighlights);
+        if (isMounted) await loadHtmlTier(savedHighlights);
       }
     };
 
     loadBook();
+    const existingTime = parseInt(localStorage.getItem(`archivum_time_${book.id}`) || '0', 10);
+    setSessionTime(existingTime);
 
     return () => { isMounted = false; };
   }, [book, user]);
 
-  // Fallback: fetch plain text directly from Gutenberg
-  const loadFallback = async (savedHighlights) => {
+  // Tier 2: Fetch HTML version from Gutenberg
+  const loadHtmlTier = async (savedHighlights) => {
+    try {
+      const htmlUrl = book.formats['text/html'] || book.formats['text/html; charset=utf-8'];
+      if (!htmlUrl) {
+        await loadPlainTextFallback(savedHighlights);
+        return;
+      }
+      
+      const htmlText = await fetchWithProxy(htmlUrl, 'text');
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlText, "text/html");
+      
+      doc.querySelectorAll("style, link, script, meta, title, header, footer").forEach(el => el.remove());
+      
+      const imgs = doc.querySelectorAll("img");
+      for (const img of Array.from(imgs)) {
+        const src = img.getAttribute("src");
+        if (src && !src.startsWith('http') && !src.startsWith('data:')) {
+           try {
+             const absoluteUrl = new URL(src, htmlUrl).href;
+             img.setAttribute("src", absoluteUrl);
+           } catch(e) {}
+        }
+        img.removeAttribute("class");
+        img.removeAttribute("style");
+      }
+      
+      doc.body.querySelectorAll("*").forEach(el => {
+        el.removeAttribute("class");
+        el.removeAttribute("style");
+      });
+      
+      htmlToInject.current = doc.body.innerHTML;
+      highlightsToRestore.current = savedHighlights || [];
+      setLoading(false);
+      
+    } catch (err) {
+      console.error("HTML fetch error:", err);
+      await loadPlainTextFallback(savedHighlights);
+    }
+  };
+
+  // Tier 3: Fetch plain text directly from Gutenberg
+  const loadPlainTextFallback = async (savedHighlights) => {
     try {
       // Try to get plain text from Gutenberg
       const textUrl = book.formats['text/plain; charset=utf-8'] 
@@ -183,10 +266,7 @@ const NativeReader = ({ book, onClose, user }) => {
         return;
       }
 
-      const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(textUrl)}`;
-      const res = await fetch(proxyUrl);
-      if (!res.ok) throw new Error("Text fetch failed");
-      const text = await res.text();
+      const text = await fetchWithProxy(textUrl, 'text');
 
       // Parse plain text into structured HTML
       const lines = text.split('\n');
@@ -252,6 +332,19 @@ const NativeReader = ({ book, onClose, user }) => {
       contentRef.current.innerHTML = htmlToInject.current;
       restoreHighlights(contentRef.current, highlightsToRestore.current);
       
+      // Extract TOC
+      const headings = contentRef.current.querySelectorAll('.chapter-heading, h1, h2, h3');
+      const items = Array.from(headings).map((h, i) => {
+        if (!h.id) h.id = `toc-${i}`;
+        return {
+          id: h.id,
+          title: h.getAttribute('data-title') || h.textContent,
+          level: parseInt(h.tagName.substring(1)),
+          element: h
+        };
+      }).filter(item => item.title.trim().length > 0);
+      setTocItems(items);
+      
       // Give the browser time to lay out columns before measuring
       requestAnimationFrame(() => {
         setTimeout(calculatePages, 100);
@@ -298,6 +391,17 @@ const NativeReader = ({ book, onClose, user }) => {
   };
 
   const saveData = async (newPage, newHighlights, newBookmarks) => {
+    // Save reading time
+    const msRead = Date.now() - sessionStartTime.current;
+    const mins = Math.floor(msRead / 60000);
+    if (mins > 0) {
+      const key = `archivum_time_${book.id}`;
+      const total = parseInt(localStorage.getItem(key) || '0', 10) + mins;
+      localStorage.setItem(key, total.toString());
+      sessionStartTime.current = Date.now();
+      setSessionTime(total);
+    }
+
     if (user && supabase) {
       try {
         await supabase.from('reading_progress').upsert({
@@ -360,6 +464,10 @@ const NativeReader = ({ book, onClose, user }) => {
   const next = useCallback(() => {
     setPage(p => {
       const newPage = Math.min(totalPages - 1, p + 1);
+      if (newPage !== p) {
+        setTurnDirection('next');
+        setTimeout(() => setTurnDirection(''), 500);
+      }
       saveData(newPage, undefined, undefined);
       return newPage;
     });
@@ -368,6 +476,10 @@ const NativeReader = ({ book, onClose, user }) => {
   const prev = useCallback(() => {
     setPage(p => {
       const newPage = Math.max(0, p - 1);
+      if (newPage !== p) {
+        setTurnDirection('prev');
+        setTimeout(() => setTurnDirection(''), 500);
+      }
       saveData(newPage, undefined, undefined);
       return newPage;
     });
@@ -469,11 +581,151 @@ const NativeReader = ({ book, onClose, user }) => {
 
   // Click on left/right third of page to navigate
   const handlePageClick = (e) => {
-    // Don't navigate if text is selected
     if (window.getSelection().toString().trim()) return;
     const third = window.innerWidth / 3;
     if (e.clientX < third) prev();
     else if (e.clientX > third * 2) next();
+    else setShowToc(false); // click center closes toc/settings
+  };
+
+  const handleTouchStart = (e) => {
+    touchStartX.current = e.changedTouches[0].screenX;
+  };
+  
+  const handleTouchEnd = (e) => {
+    touchEndX.current = e.changedTouches[0].screenX;
+    handleSwipe();
+  };
+  
+  const handleSwipe = () => {
+    const threshold = 50; 
+    const diff = touchEndX.current - touchStartX.current;
+    
+    if (diff < -threshold) next();
+    else if (diff > threshold) prev();
+  };
+
+  const navigateToElement = (element) => {
+    if (!contentRef.current || !element) return;
+    const elemRect = element.getBoundingClientRect();
+    const absoluteLeft = elemRect.left + (page * window.innerWidth);
+    const targetPage = Math.floor(absoluteLeft / window.innerWidth);
+    
+    setPage(targetPage);
+    saveData(targetPage, undefined, undefined);
+  };
+
+  const navigateToTocItem = (item) => {
+    navigateToElement(item.element);
+    setShowToc(false);
+  };
+
+  const clearSearch = () => {
+    if (!contentRef.current) return;
+    const marks = contentRef.current.querySelectorAll('mark.search-match');
+    marks.forEach(mark => {
+      const parent = mark.parentNode;
+      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+      parent.removeChild(mark);
+    });
+    contentRef.current.normalize();
+    setSearchResults([]);
+    setCurrentSearchIndex(-1);
+  };
+
+  const handleTTS = () => {
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    
+    if (isSpeaking) {
+      synth.cancel();
+      setIsSpeaking(false);
+      return;
+    }
+    
+    if (!contentRef.current) return;
+    
+    let startElement = contentRef.current;
+    if (tocItems.length > 0) {
+      let closestItem = tocItems[0];
+      for (const item of tocItems) {
+        if (!item.element) continue;
+        const elemRect = item.element.getBoundingClientRect();
+        const absoluteLeft = elemRect.left + (page * window.innerWidth);
+        const itemPage = Math.floor(absoluteLeft / window.innerWidth);
+        if (itemPage <= page) closestItem = item;
+        else break;
+      }
+      startElement = closestItem.element;
+    }
+    
+    const range = document.createRange();
+    range.setStartBefore(startElement);
+    range.setEndAfter(contentRef.current.lastChild || contentRef.current);
+    const textToRead = range.toString().replace(/\s+/g, ' ').trim();
+    
+    const utterance = new SpeechSynthesisUtterance(textToRead);
+    utterance.rate = 1.0;
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+    
+    synth.speak(utterance);
+    setIsSpeaking(true);
+  };
+
+  const handleSearch = (e) => {
+    e.preventDefault();
+    clearSearch();
+    if (!searchQuery.trim() || !contentRef.current) return;
+
+    const query = searchQuery.trim().toLowerCase();
+    const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT, null, false);
+    const matches = [];
+    let node;
+    let index = 0;
+    
+    while ((node = walker.nextNode())) {
+      if (node.parentNode.tagName === 'MARK') continue;
+      
+      let pos = node.nodeValue.toLowerCase().indexOf(query);
+      while (pos !== -1) {
+        const split1 = node.splitText(pos);
+        split1.splitText(query.length);
+        
+        const mark = document.createElement('mark');
+        mark.className = 'search-match';
+        mark.id = `search-match-${index}`;
+        mark.style.backgroundColor = 'var(--gold)';
+        mark.style.color = '#000';
+        mark.appendChild(split1.cloneNode(true));
+        split1.parentNode.replaceChild(mark, split1);
+        
+        matches.push({ id: mark.id, element: mark });
+        index++;
+        
+        walker.currentNode = mark.nextSibling || mark;
+        node = walker.currentNode;
+        if (node.nodeType === Node.TEXT_NODE) {
+          pos = node.nodeValue.toLowerCase().indexOf(query);
+        } else {
+          pos = -1;
+        }
+      }
+    }
+    
+    setSearchResults(matches);
+    if (matches.length > 0) goToSearchResult(0, matches);
+  };
+
+  const goToSearchResult = (index, results = searchResults) => {
+    if (index < 0 || index >= results.length) return;
+    if (currentSearchIndex >= 0 && results[currentSearchIndex]) {
+      results[currentSearchIndex].element.style.backgroundColor = 'var(--gold)';
+    }
+    const item = results[index];
+    item.element.style.backgroundColor = '#ff6b6b';
+    setCurrentSearchIndex(index);
+    navigateToElement(item.element);
   };
 
   // --- LOADING STATE ---
@@ -531,6 +783,15 @@ const NativeReader = ({ book, onClose, user }) => {
             <ArrowLeft size={16} />
             <span className="mono" style={{ color: 'inherit', opacity: 0.6 }}>LIBRARY</span>
           </button>
+          <button onClick={() => { setShowSearch(!showSearch); if(showSearch) clearSearch(); }} title="Search">
+            <Search size={16} />
+          </button>
+          <button onClick={() => setShowToc(!showToc)} title="Table of Contents">
+            <List size={16} />
+          </button>
+          <button onClick={handleTTS} title={isSpeaking ? "Stop Reading" : "Listen (TTS)"} style={{ color: isSpeaking ? 'var(--ember)' : 'inherit' }}>
+            {isSpeaking ? <SquareIcon size={16} fill="currentColor" /> : <Volume2 size={16} />}
+          </button>
         </div>
         <div className="mono" style={{ opacity: 0.5, fontSize: '10px', maxWidth: '40%', textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {book.title}
@@ -549,6 +810,36 @@ const NativeReader = ({ book, onClose, user }) => {
           </button>
         </div>
       </div>
+
+      {/* SEARCH BAR */}
+      {showSearch && (
+        <div className="reader-settings" style={{ background: currentTheme.bg, top: '60px', right: '160px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <form onSubmit={handleSearch} style={{ display: 'flex', gap: '8px' }}>
+            <input 
+              autoFocus
+              className="mono auth-input"
+              type="text" 
+              placeholder="Search..." 
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              style={{ background: 'transparent', border: 'none', borderBottom: `1px solid ${currentTheme.muted}`, outline: 'none', color: currentTheme.color, width: '160px', padding: '4px' }}
+            />
+            <button type="submit" style={{ opacity: 0.6 }}><Search size={16}/></button>
+          </form>
+          {searchResults.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span className="mono" style={{ fontSize: '10px', opacity: 0.6 }}>{currentSearchIndex + 1} OF {searchResults.length}</span>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={() => goToSearchResult(currentSearchIndex - 1)} disabled={currentSearchIndex <= 0} style={{ opacity: currentSearchIndex <= 0 ? 0.3 : 0.8 }}><ChevronUp size={16}/></button>
+                <button onClick={() => goToSearchResult(currentSearchIndex + 1)} disabled={currentSearchIndex >= searchResults.length - 1} style={{ opacity: currentSearchIndex >= searchResults.length - 1 ? 0.3 : 0.8 }}><ChevronDown size={16}/></button>
+              </div>
+            </div>
+          )}
+          {searchResults.length === 0 && searchQuery && (
+            <span className="mono" style={{ fontSize: '10px', opacity: 0.5 }}>NO RESULTS</span>
+          )}
+        </div>
+      )}
 
       {/* SETTINGS PANEL */}
       {showSettings && (
@@ -580,6 +871,47 @@ const NativeReader = ({ book, onClose, user }) => {
         </div>
       )}
 
+      {/* TOC SIDEBAR */}
+      <div style={{
+        position: 'absolute', top: '60px', left: 0, bottom: 0, width: '300px',
+        background: currentTheme.bg, zIndex: 1000,
+        borderRight: `1px solid ${currentTheme.muted}`,
+        transform: showToc ? 'translateX(0)' : 'translateX(-100%)',
+        transition: 'transform 0.4s cubic-bezier(0.22, 1, 0.36, 1)',
+        display: 'flex', flexDirection: 'column',
+        boxShadow: showToc ? '20px 0 40px rgba(0,0,0,0.5)' : 'none'
+      }}>
+        <div className="mono" style={{ padding: '24px', fontSize: '12px', letterSpacing: '0.1em', borderBottom: `1px solid ${currentTheme.muted}` }}>
+          TABLE OF CONTENTS
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 0' }}>
+          {tocItems.length === 0 ? (
+            <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO HEADINGS FOUND</div>
+          ) : (
+            tocItems.map((item, idx) => (
+              <div 
+                key={idx} 
+                onClick={() => navigateToTocItem(item)}
+                style={{ 
+                  padding: `12px 24px 12px ${24 + (item.level - 1) * 16}px`,
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontFamily: "'Libre Baskerville', serif",
+                  lineHeight: 1.4,
+                  opacity: 0.8,
+                  transition: 'background 0.2s, opacity 0.2s',
+                  borderBottom: `1px solid ${currentTheme.muted}30`
+                }}
+                onMouseEnter={e => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = currentTheme.muted; }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = 0.8; e.currentTarget.style.background = 'transparent'; }}
+              >
+                {item.title}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
       {/* SELECTION MENU */}
       {selectionMenu && (
         <div className="selection-menu" style={{ left: selectionMenu.x, top: selectionMenu.y }}>
@@ -594,7 +926,13 @@ const NativeReader = ({ book, onClose, user }) => {
       )}
 
       {/* MAIN READING AREA */}
-      <div style={{ flex: 1, position: 'relative' }} onMouseUp={handleMouseUp} onClick={handlePageClick}>
+      <div 
+        style={{ flex: 1, position: 'relative' }} 
+        onMouseUp={handleMouseUp} 
+        onClick={handlePageClick}
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+      >
         
         {/* Chapter headers for spread */}
         {spread ? (
@@ -622,28 +960,33 @@ const NativeReader = ({ book, onClose, user }) => {
         <div style={{
           width: '100vw', height: '100vh', 
           overflow: 'hidden', position: 'relative',
+          perspective: '2500px'
         }}>
           {/* Spine shadow for spread mode */}
           {spread && <div className="spread-spine" />}
           
-          <div 
-            ref={contentRef}
-            className="reader-content"
-            style={{
-              height: 'calc(100vh - 140px)',
-              marginTop: '70px',
-              width: 'max-content',
-              columnWidth: colWidth,
-              columnGap: colGap,
-              columnFill: 'auto',
-              paddingLeft: padLeft,
-              paddingRight: padLeft,
-              transform: `translateX(-${page * 100}vw)`,
-              transition: 'transform 0.5s cubic-bezier(0.22, 1, 0.36, 1)',
-              fontSize: `${fontSize}px`,
-              color: currentTheme.color,
-            }}
-          >
+          <div style={{
+            transform: `translateX(-${page * 100}vw)`,
+            transition: 'transform 0.5s cubic-bezier(0.22, 1, 0.36, 1)',
+            width: 'max-content',
+            height: '100%'
+          }}>
+            <div 
+              ref={contentRef}
+              className={`reader-content ${turnDirection === 'next' ? 'turning-next' : turnDirection === 'prev' ? 'turning-prev' : ''}`}
+              style={{
+                height: 'calc(100vh - 140px)',
+                marginTop: '70px',
+                columnWidth: colWidth,
+                columnGap: colGap,
+                columnFill: 'auto',
+                paddingLeft: padLeft,
+                paddingRight: padLeft,
+                fontSize: `${fontSize}px`,
+                color: currentTheme.color,
+              }}
+            >
+            </div>
           </div>
         </div>
 

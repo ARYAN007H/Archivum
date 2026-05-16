@@ -505,6 +505,27 @@ button {
   word-spacing: 0.02em;
   hyphens: auto;
   -webkit-hyphens: auto;
+  font-feature-settings: "liga" 1, "kern" 1, "onum" 1;
+  hanging-punctuation: first last;
+  will-change: transform, opacity, filter;
+}
+
+.reader-content.turning-next {
+  animation: pageTurnNext 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.reader-content.turning-prev {
+  animation: pageTurnPrev 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+@keyframes pageTurnNext {
+  0% { opacity: 0.4; transform: rotateY(8deg) scale(0.97) translateX(20px); filter: blur(2px); }
+  100% { opacity: 1; transform: rotateY(0deg) scale(1) translateX(0); filter: blur(0px); }
+}
+
+@keyframes pageTurnPrev {
+  0% { opacity: 0.4; transform: rotateY(-8deg) scale(0.97) translateX(-20px); filter: blur(2px); }
+  100% { opacity: 1; transform: rotateY(0deg) scale(1) translateX(0); filter: blur(0px); }
 }
 
 .reader-content h1,
