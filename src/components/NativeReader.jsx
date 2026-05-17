@@ -588,16 +588,25 @@ const NativeReader = ({ book, onClose, user }) => {
     return { bg: '#F5F0E8', color: '#2C2416', accent: '#E04E2A', muted: 'rgba(0,0,0,0.06)' };
   };
 
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   const currentTheme = getThemeVars();
   
-  // Column layout parameters — carefully tuned for book-like feel
-  const colWidth = spread ? 'calc(50vw - 80px)' : 'calc(100vw - 80px)';
-  const colGap = '80px';
-  const padLeft = '40px';
+  const effectiveSpread = isMobile ? false : spread;
+  const colGap = isMobile ? '20px' : '80px';
+  const padLeft = isMobile ? '20px' : '40px';
+  const colWidth = effectiveSpread ? 'calc(50vw - 80px)' : (isMobile ? 'calc(100vw - 40px)' : 'calc(100vw - 80px)');
 
   const readerCursorRef = useRef(null);
 
   useEffect(() => {
+    if (isMobile) return;
     const handleGlobalMouseMove = (e) => {
       if (readerCursorRef.current) {
         readerCursorRef.current.style.left = e.clientX + 'px';
@@ -934,37 +943,36 @@ const NativeReader = ({ book, onClose, user }) => {
         }} />
       </div>
 
-      {/* TOP BAR — auto-hide, shows on hover */}
-      <div className="reader-topbar">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <button onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <ArrowLeft size={16} />
-            <span className="mono" style={{ color: 'inherit', opacity: 0.6 }}>LIBRARY</span>
+      {/* Top bar */}
+      <div 
+        className="reader-topbar"
+        onMouseEnter={() => setShowTopBar(true)}
+        onMouseLeave={() => { setShowTopBar(false); setShowSettings(false); setShowToc(false); setShowSearch(false); }}
+      >
+        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+          <button onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
+            <ArrowLeft size={16} /> <span className="mono" style={{ fontSize: '10px' }}>{!isMobile && "LIBRARY"}</span>
           </button>
-          <button onClick={() => { setShowSearch(!showSearch); if(showSearch) clearSearch(); }} title="Search">
-            <Search size={16} />
-          </button>
-          <button onClick={() => setShowToc(!showToc)} title="Table of Contents">
-            <List size={16} />
-          </button>
-          <button onClick={handleTTS} title={isSpeaking ? "Stop Reading" : "Listen (TTS)"} style={{ color: isSpeaking ? 'var(--ember)' : 'inherit' }}>
-            {isSpeaking ? <SquareIcon size={16} fill="currentColor" /> : <Volume2 size={16} />}
-          </button>
+          {!isMobile && (
+            <>
+              <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
+              <button onClick={() => setShowToc(!showToc)} style={{ color: showToc ? 'var(--ember)' : 'var(--text-secondary)' }}>
+                <List size={16} />
+              </button>
+              <button onClick={() => setShowSearch(!showSearch)} style={{ color: showSearch ? 'var(--ember)' : 'var(--text-secondary)' }}>
+                <Search size={16} />
+              </button>
+            </>
+          )}
         </div>
-        <div className="mono" style={{ opacity: 0.5, fontSize: '10px', maxWidth: '40%', textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {book.title}
-        </div>
-        <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
-          <button onClick={() => setSpread(!spread)} title={spread ? 'Single page' : 'Two-page spread'}>
-            {spread ? <Square size={16} /> : <Columns size={16} />}
-          </button>
-          <button onClick={() => setShowSettings(!showSettings)} title="Settings">
+        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+          {!isMobile && (
+            <button onClick={() => setSpread(!spread)} style={{ color: spread ? 'var(--ember)' : 'var(--text-secondary)' }}>
+              {spread ? <Columns size={16} /> : <Square size={16} />}
+            </button>
+          )}
+          <button onClick={() => setShowSettings(!showSettings)} style={{ color: showSettings ? 'var(--ember)' : 'var(--text-secondary)' }}>
             <Settings size={16} />
-          </button>
-          <button onClick={() => {
-            try { document.documentElement.requestFullscreen(); } catch(e) {}
-          }} title="Fullscreen">
-            <Maximize size={16} />
           </button>
         </div>
       </div>
@@ -1093,7 +1101,7 @@ const NativeReader = ({ book, onClose, user }) => {
       >
         
         {/* Chapter headers for spread */}
-        {spread ? (
+        {effectiveSpread ? (
           <>
             <div className="page-number" style={{ top: '40px', bottom: 'auto', left: '5vw', width: '38vw', fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {book.title.length > 40 ? book.title.substring(0, 40) + '…' : book.title}
@@ -1120,9 +1128,10 @@ const NativeReader = ({ book, onClose, user }) => {
           overflow: 'hidden', position: 'relative',
           perspective: '2500px'
         }}>
-          {/* Spine shadow for spread mode */}
-          {spread && <div className="spread-spine" />}
-          
+          {/* Optional Spine for Spread */}
+          {effectiveSpread && (
+            <div className="spread-spine" />
+          )}    
           <div style={{
             transform: `translateX(-${page * 100}vw)`,
             transition: 'transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)',

@@ -819,7 +819,56 @@ button {
 }
 
 .selection-menu button:hover {
-  background: rgba(255,255,255,0.06);
+  background: var(--bg-raised);
+}
+
+/* ======================== */
+/* MOBILE OPTIMIZATIONS     */
+/* ======================== */
+@media (max-width: 768px) {
+  /* Hide the custom dot on mobile, use default touch behavior */
+  #cursor-dot { display: none !important; }
+  
+  /* App Nav */
+  #nav {
+    padding: 0 16px !important;
+    height: auto !important;
+    flex-wrap: wrap;
+    padding-top: 10px !important;
+    padding-bottom: 10px !important;
+  }
+  #nav input {
+    width: 150px !important;
+  }
+  
+  /* Detail panel */
+  .detail-panel {
+    flex-direction: column !important;
+    padding: 24px !important;
+    gap: 20px !important;
+    height: 85vh !important;
+    overflow-y: auto !important;
+    align-items: center;
+  }
+  .detail-cover {
+    max-width: 160px !important;
+  }
+  
+  /* Reader adjustments */
+  .reader-topbar {
+    padding: 0 20px !important;
+  }
+  .reader-settings {
+    right: 16px !important;
+    left: 16px !important;
+    top: 60px !important;
+  }
+  .reader-content h1 { font-size: 1.6em !important; margin-top: 2rem !important; }
+  .reader-content h2 { font-size: 1.3em !important; margin-top: 2rem !important; }
+  .reader-content p { text-indent: 1.2em !important; }
+  
+  /* Hide arrows in reader */
+  .nav-arrow { display: none !important; }
 }
 
 /* ======================== */
