@@ -595,9 +595,20 @@ const NativeReader = ({ book, onClose, user }) => {
   const colGap = '80px';
   const padLeft = '40px';
 
-  const [mousePos, setMousePos] = useState({ x: -100, y: -100 });
-  const handleMouseMove = useCallback((e) => {
-    setMousePos({ x: e.clientX, y: e.clientY });
+  const readerCursorRef = useRef(null);
+
+  useEffect(() => {
+    const handleGlobalMouseMove = (e) => {
+      if (readerCursorRef.current) {
+        readerCursorRef.current.style.left = e.clientX + 'px';
+        readerCursorRef.current.style.top = e.clientY + 'px';
+        if (readerCursorRef.current.style.display === 'none') {
+          readerCursorRef.current.style.display = 'block';
+        }
+      }
+    };
+    document.addEventListener('mousemove', handleGlobalMouseMove);
+    return () => document.removeEventListener('mousemove', handleGlobalMouseMove);
   }, []);
 
   useEffect(() => {
@@ -878,7 +889,7 @@ const NativeReader = ({ book, onClose, user }) => {
 
   return (
     <div 
-      onMouseMove={handleMouseMove}
+      className="native-reader-root"
       style={{
         position: 'fixed', inset: 0, zIndex: 1000,
         backgroundColor: currentTheme.bg,
@@ -889,11 +900,17 @@ const NativeReader = ({ book, onClose, user }) => {
         cursor: 'none'
       }}
     >
+      <style>{`
+        .native-reader-root, .native-reader-root * {
+          cursor: none !important;
+        }
+      `}</style>
       <div 
+        ref={readerCursorRef}
         style={{
           position: 'fixed',
-          top: mousePos.y,
-          left: mousePos.x,
+          top: '-10px',
+          left: '-10px',
           width: '8px',
           height: '8px',
           backgroundColor: 'var(--ember)',
@@ -901,7 +918,7 @@ const NativeReader = ({ book, onClose, user }) => {
           pointerEvents: 'none',
           zIndex: 9999,
           transform: 'translate(-50%, -50%)',
-          display: mousePos.x < 0 ? 'none' : 'block'
+          display: 'none'
         }}
       />
       {/* Progress bar at very top */}

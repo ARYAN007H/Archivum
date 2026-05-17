@@ -510,6 +510,12 @@ button {
   will-change: transform, opacity, filter;
 }
 
+.reader-content * {
+  max-width: 100%;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
 .reader-content.turning-next {
   animation: pageTurnNext 0.5s cubic-bezier(0.25, 1, 0.5, 1);
 }
