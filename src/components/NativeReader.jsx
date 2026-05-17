@@ -2,7 +2,60 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { ArrowLeft, ArrowRight, Settings, Maximize, Columns, Square, BookmarkPlus, Edit3, X, List, Search, ChevronUp, ChevronDown, Play, Square as SquareIcon, Volume2 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 
-// Multi-proxy fetcher — tries direct, then multiple CORS proxies
+const stripGutenbergBoilerplate = (doc) => {
+  const textWalker = document.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, null, false);
+  let startNode = null;
+  let endNode = null;
+  let node;
+  while ((node = textWalker.nextNode())) {
+    const text = node.nodeValue.toUpperCase();
+    if (!startNode && text.includes("START OF THE PROJECT GUTENBERG")) {
+      startNode = node.parentElement;
+    }
+    if (!endNode && text.includes("END OF THE PROJECT GUTENBERG")) {
+      endNode = node.parentElement;
+    }
+  }
+
+  if (startNode) {
+    let current = startNode;
+    while (current && current !== doc.body) {
+      let prev = current.previousSibling;
+      while (prev) {
+        const toRemove = prev;
+        prev = prev.previousSibling;
+        if (toRemove.remove) toRemove.remove();
+        else if (toRemove.parentNode) toRemove.parentNode.removeChild(toRemove);
+      }
+      const parent = current.parentElement;
+      if (current === startNode) {
+        if (current.remove) current.remove();
+        else if (current.parentNode) current.parentNode.removeChild(current);
+      }
+      current = parent;
+    }
+  }
+
+  if (endNode) {
+    let current = endNode;
+    while (current && current !== doc.body) {
+      let next = current.nextSibling;
+      while (next) {
+        const toRemove = next;
+        next = next.nextSibling;
+        if (toRemove.remove) toRemove.remove();
+        else if (toRemove.parentNode) toRemove.parentNode.removeChild(toRemove);
+      }
+      const parent = current.parentElement;
+      if (current === endNode) {
+        if (current.remove) current.remove();
+        else if (current.parentNode) current.parentNode.removeChild(current);
+      }
+      current = parent;
+    }
+  }
+};
+
 const fetchWithProxy = async (url, responseType = 'text') => {
   const proxies = [
     (u) => u, // try direct first
@@ -152,6 +205,8 @@ const NativeReader = ({ book, onClose, user }) => {
 
           chapterDoc.querySelectorAll("style, link, script").forEach(el => el.remove());
           
+          stripGutenbergBoilerplate(chapterDoc);
+
           const chapterBaseDir = fullPath.includes('/') ? fullPath.substring(0, fullPath.lastIndexOf('/') + 1) : '';
           const resolveChapterPath = (src) => {
             if (src.startsWith('http') || src.startsWith('data:')) return src;
@@ -231,6 +286,8 @@ const NativeReader = ({ book, onClose, user }) => {
       
       doc.querySelectorAll("style, link, script, meta, title, header, footer").forEach(el => el.remove());
       
+      stripGutenbergBoilerplate(doc);
+
       const imgs = doc.querySelectorAll("img");
       for (const img of Array.from(imgs)) {
         const src = img.getAttribute("src");
@@ -332,7 +389,11 @@ const NativeReader = ({ book, onClose, user }) => {
         fullHtml += `<p>${currentParagraph.trim()}</p>`;
       }
 
-      htmlToInject.current = fullHtml;
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(`<body>${fullHtml}</body>`, "text/html");
+      stripGutenbergBoilerplate(doc);
+
+      htmlToInject.current = doc.body.innerHTML;
       highlightsToRestore.current = savedHighlights || [];
       setLoading(false);
     } catch(e) {
@@ -345,6 +406,17 @@ const NativeReader = ({ book, onClose, user }) => {
   useEffect(() => {
     if (!loading && contentRef.current && htmlToInject.current) {
       contentRef.current.innerHTML = htmlToInject.current;
+      
+      const injectedImgs = contentRef.current.querySelectorAll('img');
+      injectedImgs.forEach(img => {
+        img.onerror = () => { img.style.display = 'none'; };
+        img.style.maxWidth = '100%';
+        img.style.maxHeight = '40vh';
+        img.style.height = 'auto';
+        img.style.display = 'block';
+        img.style.margin = '1rem auto';
+      });
+
       restoreHighlights(contentRef.current, highlightsToRestore.current);
       
       // Extract TOC
@@ -511,7 +583,7 @@ const NativeReader = ({ book, onClose, user }) => {
   }, [next, prev, onClose]);
 
   const getThemeVars = () => {
-    if (theme === 'night') return { bg: '#06060A', color: '#EDE8DF', accent: '#E04E2A', muted: 'rgba(255,255,255,0.08)' };
+    if (theme === 'night') return { bg: '#09080D', color: '#E8DFD0', accent: '#E04E2A', muted: 'rgba(255,255,255,0.08)' };
     if (theme === 'sepia') return { bg: '#1A1209', color: '#D4B896', accent: '#BF9B5A', muted: 'rgba(255,255,255,0.06)' };
     return { bg: '#F5F0E8', color: '#2C2416', accent: '#E04E2A', muted: 'rgba(0,0,0,0.06)' };
   };
@@ -519,9 +591,20 @@ const NativeReader = ({ book, onClose, user }) => {
   const currentTheme = getThemeVars();
   
   // Column layout parameters — carefully tuned for book-like feel
-  const colWidth = spread ? '40vw' : '80vw';
-  const colGap = spread ? '10vw' : '20vw';
-  const padLeft = spread ? '5vw' : '10vw';
+  const colWidth = spread ? 'calc(50vw - 80px)' : 'calc(100vw - 80px)';
+  const colGap = '80px';
+  const padLeft = '40px';
+
+  const [mousePos, setMousePos] = useState({ x: -100, y: -100 });
+  const handleMouseMove = useCallback((e) => {
+    setMousePos({ x: e.clientX, y: e.clientY });
+  }, []);
+
+  useEffect(() => {
+    const sysDot = document.getElementById('cursor-dot');
+    if (sysDot) sysDot.style.display = 'none';
+    return () => { if (sysDot) sysDot.style.display = 'block'; };
+  }, []);
 
   const handleMouseUp = (e) => {
     const sel = window.getSelection();
@@ -596,6 +679,32 @@ const NativeReader = ({ book, onClose, user }) => {
 
   // Click on left/right third of page to navigate
   const handlePageClick = (e) => {
+    const anchor = e.target.closest('a');
+    if (anchor) {
+      e.preventDefault();
+      e.stopPropagation();
+      const href = anchor.getAttribute('href');
+      if (!href) return;
+      if (href.startsWith('http')) {
+        window.open(href, '_blank');
+        return;
+      }
+      if (href.startsWith('#')) {
+        const fragment = href.substring(1);
+        if (!contentRef.current) return;
+        let target = contentRef.current.querySelector(`#${CSS.escape(fragment)}`);
+        if (!target) {
+          const headings = Array.from(contentRef.current.querySelectorAll('h1, h2, h3, h4, h5, h6, .chapter-heading'));
+          target = headings.find(h => h.id === fragment || h.textContent.trim() === fragment);
+        }
+        if (target) {
+          navigateToElement(target);
+        }
+        return;
+      }
+      return;
+    }
+
     if (window.getSelection().toString().trim()) return;
     const third = window.innerWidth / 3;
     if (e.clientX < third) prev();
@@ -769,15 +878,32 @@ const NativeReader = ({ book, onClose, user }) => {
 
   return (
     <div 
+      onMouseMove={handleMouseMove}
       style={{
         position: 'fixed', inset: 0, zIndex: 1000,
         backgroundColor: currentTheme.bg,
         color: currentTheme.color,
         display: 'flex', flexDirection: 'column',
         transition: 'background-color 0.4s ease, color 0.4s ease',
-        overflow: 'hidden'
+        overflow: 'hidden',
+        cursor: 'none'
       }}
     >
+      <div 
+        style={{
+          position: 'fixed',
+          top: mousePos.y,
+          left: mousePos.x,
+          width: '8px',
+          height: '8px',
+          backgroundColor: 'var(--ember)',
+          borderRadius: '50%',
+          pointerEvents: 'none',
+          zIndex: 9999,
+          transform: 'translate(-50%, -50%)',
+          display: mousePos.x < 0 ? 'none' : 'block'
+        }}
+      />
       {/* Progress bar at very top */}
       <div style={{
         position: 'absolute', top: 0, left: 0, right: 0, height: '2px', zIndex: 200,
@@ -982,7 +1108,7 @@ const NativeReader = ({ book, onClose, user }) => {
           
           <div style={{
             transform: `translateX(-${page * 100}vw)`,
-            transition: 'transform 0.5s cubic-bezier(0.22, 1, 0.36, 1)',
+            transition: 'transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
             width: 'max-content',
             height: '100%'
           }}>
@@ -999,6 +1125,9 @@ const NativeReader = ({ book, onClose, user }) => {
                 paddingRight: padLeft,
                 fontSize: `${fontSize}px`,
                 color: currentTheme.color,
+                boxSizing: 'border-box',
+                overflow: 'hidden',
+                wordBreak: 'break-word',
               }}
             >
             </div>

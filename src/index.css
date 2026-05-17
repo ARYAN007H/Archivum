@@ -545,16 +545,16 @@ button {
 .reader-content h2,
 .reader-content .chapter,
 .reader-content .titlepage {
-  break-before: column;
 }
 
 .reader-content h1 {
   font-size: 2em;
-  margin-top: 3em;
+  margin-top: 3rem;
 }
 
 .reader-content h2 {
   font-size: 1.6em;
+  margin-top: 3rem;
 }
 
 .reader-content h3 {
@@ -675,7 +675,6 @@ button {
 }
 
 .reader-content .chapter-break {
-  break-before: column;
   height: 0;
   margin: 0;
   padding: 0;
