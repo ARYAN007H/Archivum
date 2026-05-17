@@ -58,6 +58,7 @@ const stripGutenbergBoilerplate = (doc) => {
 
 const fetchWithProxy = async (url, responseType = 'text') => {
   const proxies = [
+    (u) => `/api/proxy?url=${encodeURIComponent(u)}`,
     (u) => u, // try direct first
     (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
@@ -111,6 +112,7 @@ const NativeReader = ({ book, onClose, user }) => {
   const htmlToInject = useRef('');
   const highlightsToRestore = useRef([]);
   const [totalPages, setTotalPages] = useState(1);
+  const [isRecalculating, setIsRecalculating] = useState(false);
 
   const [selectionMenu, setSelectionMenu] = useState(null);
   
@@ -434,7 +436,8 @@ const NativeReader = ({ book, onClose, user }) => {
       
       // Give the browser time to lay out columns before measuring
       requestAnimationFrame(() => {
-        setTimeout(calculatePages, 100);
+        setIsRecalculating(true);
+        setTimeout(calculatePages, 200);
       });
       
       // Clear refs to prevent re-injecting on other re-renders
@@ -516,19 +519,30 @@ const NativeReader = ({ book, onClose, user }) => {
       setTotalPages(pages);
       setPage(p => Math.min(Math.max(p, 0), pages - 1));
     }
+    setIsRecalculating(false);
   }, []);
 
   // Recalculate pages when font size or spread mode changes
   useEffect(() => {
     if (!loading) {
-      const timer = setTimeout(calculatePages, 150);
+      setIsRecalculating(true);
+      const timer = setTimeout(calculatePages, 200);
       return () => clearTimeout(timer);
     }
   }, [fontSize, spread, loading, calculatePages]);
 
   useEffect(() => {
-    window.addEventListener('resize', calculatePages);
-    return () => window.removeEventListener('resize', calculatePages);
+    let timer;
+    const handleResize = () => {
+      setIsRecalculating(true);
+      clearTimeout(timer);
+      timer = setTimeout(calculatePages, 200);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      clearTimeout(timer);
+    };
   }, [calculatePages]);
 
   useEffect(() => {
@@ -670,14 +684,31 @@ const NativeReader = ({ book, onClose, user }) => {
     const newHighlights = [...highlights, hlObj];
     setHighlights(newHighlights);
     
-    const mark = document.createElement('mark');
-    
+    const wrapTextNodes = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (node.nodeValue.trim().length > 0) {
+          const mark = document.createElement('mark');
+          mark.style.backgroundColor = 'var(--gold)';
+          mark.style.color = 'var(--bg-void, #000)';
+          mark.textContent = node.nodeValue;
+          return mark;
+        }
+        return node.cloneNode(false);
+      }
+      
+      const clone = node.cloneNode(false);
+      Array.from(node.childNodes).forEach(child => {
+        clone.appendChild(wrapTextNodes(child));
+      });
+      return clone;
+    };
+
     try {
-      range.surroundContents(mark);
-    } catch(e) {
       const fragment = range.extractContents();
-      mark.appendChild(fragment);
-      range.insertNode(mark);
+      const wrappedFragment = wrapTextNodes(fragment);
+      range.insertNode(wrappedFragment);
+    } catch(e) {
+      console.error("Multi-node highlight error:", e);
     }
     
     window.getSelection().removeAllRanges();
@@ -777,6 +808,50 @@ const NativeReader = ({ book, onClose, user }) => {
     setCurrentSearchIndex(-1);
   };
 
+  const getVisibleText = () => {
+    if (!contentRef.current) return '';
+    const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT, null, false);
+    let node;
+    let text = '';
+    while ((node = walker.nextNode())) {
+      if (!node.nodeValue.trim()) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rects = range.getClientRects();
+      if (rects.length > 0) {
+        let isVisible = false;
+        for (let i = 0; i < rects.length; i++) {
+          if (rects[i].right > 0 && rects[i].left < window.innerWidth) {
+            isVisible = true;
+            break;
+          }
+        }
+        if (isVisible) text += node.nodeValue + ' ';
+      }
+    }
+    return text.replace(/\s+/g, ' ').trim();
+  };
+
+  const readCurrentPage = () => {
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    synth.cancel();
+    
+    const text = getVisibleText();
+    if (!text) {
+      setIsSpeaking(false);
+      return;
+    }
+    
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.0;
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+    
+    synth.speak(utterance);
+    setIsSpeaking(true);
+  };
+
   const handleTTS = () => {
     const synth = window.speechSynthesis;
     if (!synth) return;
@@ -787,35 +862,18 @@ const NativeReader = ({ book, onClose, user }) => {
       return;
     }
     
-    if (!contentRef.current) return;
-    
-    let startElement = contentRef.current;
-    if (tocItems.length > 0) {
-      let closestItem = tocItems[0];
-      for (const item of tocItems) {
-        if (!item.element) continue;
-        const elemRect = item.element.getBoundingClientRect();
-        const absoluteLeft = elemRect.left + (page * window.innerWidth);
-        const itemPage = Math.floor(absoluteLeft / window.innerWidth);
-        if (itemPage <= page) closestItem = item;
-        else break;
-      }
-      startElement = closestItem.element;
-    }
-    
-    const range = document.createRange();
-    range.setStartBefore(startElement);
-    range.setEndAfter(contentRef.current.lastChild || contentRef.current);
-    const textToRead = range.toString().replace(/\s+/g, ' ').trim();
-    
-    const utterance = new SpeechSynthesisUtterance(textToRead);
-    utterance.rate = 1.0;
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-    
-    synth.speak(utterance);
-    setIsSpeaking(true);
+    readCurrentPage();
   };
+
+  useEffect(() => {
+    const synth = window.speechSynthesis;
+    if (isSpeaking && synth && synth.speaking) {
+      synth.cancel();
+      setTimeout(() => {
+        readCurrentPage();
+      }, 50);
+    }
+  }, [page]);
 
   const handleSearch = (e) => {
     e.preventDefault();
@@ -912,6 +970,10 @@ const NativeReader = ({ book, onClose, user }) => {
       <style>{`
         .native-reader-root, .native-reader-root * {
           cursor: none !important;
+        }
+        .recalculating {
+          opacity: 0 !important;
+          transition: opacity 0.2s ease !important;
         }
       `}</style>
       <div 
@@ -1140,7 +1202,7 @@ const NativeReader = ({ book, onClose, user }) => {
           }}>
             <div 
               ref={contentRef}
-              className={`reader-content ${turnDirection === 'next' ? 'turning-next' : turnDirection === 'prev' ? 'turning-prev' : ''}`}
+              className={`reader-content ${turnDirection === 'next' ? 'turning-next' : turnDirection === 'prev' ? 'turning-prev' : ''} ${isRecalculating ? 'recalculating' : ''}`}
               style={{
                 height: 'calc(100vh - 140px)',
                 marginTop: '70px',
