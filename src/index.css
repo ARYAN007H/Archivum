@@ -1223,21 +1223,81 @@ button {
 }
 
 .reader-content.turning-next {
-  animation: pageTurnNext 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+  /* deprecated — animation now on .page-slider */
 }
 
 .reader-content.turning-prev {
-  animation: pageTurnPrev 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+  /* deprecated — animation now on .page-slider */
 }
 
-@keyframes pageTurnNext {
-  0% { opacity: 0.4; transform: rotateY(8deg) scale(0.97) translateX(20px); filter: blur(2px); }
-  100% { opacity: 1; transform: rotateY(0deg) scale(1) translateX(0); filter: blur(0px); }
+/* ======================== */
+/* 3D BOOK PAGE TURN        */
+/* ======================== */
+.page-slider {
+  transform-style: preserve-3d;
 }
 
-@keyframes pageTurnPrev {
-  0% { opacity: 0.4; transform: rotateY(-8deg) scale(0.97) translateX(-20px); filter: blur(2px); }
-  100% { opacity: 1; transform: rotateY(0deg) scale(1) translateX(0); filter: blur(0px); }
+.page-slider.turning-next {
+  animation: bookPageNext 0.55s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
+.page-slider.turning-prev {
+  animation: bookPagePrev 0.55s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
+@keyframes bookPageNext {
+  0% {
+    filter: brightness(1) drop-shadow(0 0 0 transparent);
+  }
+  20% {
+    filter: brightness(0.82) drop-shadow(-10px 0 20px rgba(0,0,0,0.3));
+  }
+  60% {
+    filter: brightness(0.93) drop-shadow(-4px 0 8px rgba(0,0,0,0.15));
+  }
+  100% {
+    filter: brightness(1) drop-shadow(0 0 0 transparent);
+  }
+}
+
+@keyframes bookPagePrev {
+  0% {
+    filter: brightness(1) drop-shadow(0 0 0 transparent);
+  }
+  20% {
+    filter: brightness(0.82) drop-shadow(10px 0 20px rgba(0,0,0,0.3));
+  }
+  60% {
+    filter: brightness(0.93) drop-shadow(4px 0 8px rgba(0,0,0,0.15));
+  }
+  100% {
+    filter: brightness(1) drop-shadow(0 0 0 transparent);
+  }
+}
+
+/* Page turn shadow overlay */
+.page-slider.turning-next::after,
+.page-slider.turning-prev::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  animation: pageShadow 0.55s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
+.page-slider.turning-next::after {
+  background: linear-gradient(to left, rgba(0,0,0,0.08) 0%, transparent 30%);
+}
+
+.page-slider.turning-prev::after {
+  background: linear-gradient(to right, rgba(0,0,0,0.08) 0%, transparent 30%);
+}
+
+@keyframes pageShadow {
+  0% { opacity: 0; }
+  20% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 .reader-content h1,

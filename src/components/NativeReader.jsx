@@ -567,7 +567,7 @@ const NativeReader = ({ book, onClose, user }) => {
       const newPage = Math.min(totalPages - 1, p + 1);
       if (newPage !== p) {
         setTurnDirection('next');
-        setTimeout(() => setTurnDirection(''), 500);
+        setTimeout(() => setTurnDirection(''), 600);
       }
       saveData(newPage, undefined, undefined);
       return newPage;
@@ -579,7 +579,7 @@ const NativeReader = ({ book, onClose, user }) => {
       const newPage = Math.max(0, p - 1);
       if (newPage !== p) {
         setTurnDirection('prev');
-        setTimeout(() => setTurnDirection(''), 500);
+        setTimeout(() => setTurnDirection(''), 600);
       }
       saveData(newPage, undefined, undefined);
       return newPage;
@@ -613,9 +613,13 @@ const NativeReader = ({ book, onClose, user }) => {
   const currentTheme = getThemeVars();
   
   const effectiveSpread = isMobile ? false : spread;
-  const colGap = isMobile ? '20px' : '80px';
-  const padLeft = isMobile ? '20px' : '40px';
-  const colWidth = effectiveSpread ? 'calc(50vw - 80px)' : (isMobile ? 'calc(100vw - 40px)' : 'calc(100vw - 80px)');
+  // Exact math: viewportWidth = paddingLeft + col1 + gap + col2 + paddingRight
+  // For spread (2 cols): colWidth = (100vw - 2*pad - gap) / 2
+  // For single: colWidth = 100vw - 2*pad
+  const pad = isMobile ? 24 : 60;
+  const gap = effectiveSpread ? 80 : 0;
+  const numCols = effectiveSpread ? 2 : 1;
+  const colWidthCalc = `calc((100vw - ${2 * pad}px - ${gap}px) / ${numCols})`;
 
   const readerCursorRef = useRef(null);
 
@@ -1194,23 +1198,27 @@ const NativeReader = ({ book, onClose, user }) => {
           {effectiveSpread && (
             <div className="spread-spine" />
           )}    
-          <div style={{
-            transform: `translateX(-${page * 100}vw)`,
-            transition: 'transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
-            width: 'max-content',
-            height: '100%'
-          }}>
+          <div 
+            className={`page-slider ${turnDirection === 'next' ? 'turning-next' : turnDirection === 'prev' ? 'turning-prev' : ''}`}
+            style={{
+              transform: `translateX(-${page * 100}vw)`,
+              transition: turnDirection ? 'none' : 'transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+              width: 'max-content',
+              height: '100%'
+            }}
+          >
             <div 
               ref={contentRef}
-              className={`reader-content ${turnDirection === 'next' ? 'turning-next' : turnDirection === 'prev' ? 'turning-prev' : ''} ${isRecalculating ? 'recalculating' : ''}`}
+              className={`reader-content ${isRecalculating ? 'recalculating' : ''}`}
               style={{
                 height: 'calc(100vh - 140px)',
                 marginTop: '70px',
-                columnWidth: colWidth,
-                columnGap: colGap,
+                columnWidth: colWidthCalc,
+                columnCount: numCols,
+                columnGap: `${gap}px`,
                 columnFill: 'auto',
-                paddingLeft: padLeft,
-                paddingRight: padLeft,
+                paddingLeft: `${pad}px`,
+                paddingRight: `${pad}px`,
                 fontSize: `${fontSize}px`,
                 color: currentTheme.color,
                 boxSizing: 'border-box',
