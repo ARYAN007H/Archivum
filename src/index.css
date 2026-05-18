@@ -112,6 +112,37 @@ button {
   background: rgba(255,255,255,0.03);
 }
 
+.genre-pill {
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  transition: background 0.3s, color 0.3s, border-color 0.3s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.genre-pill:hover,
+.genre-pill.active {
+  color: #fff;
+  background: var(--ember);
+  border-color: var(--ember);
+}
+
+.detail-tag {
+  background: var(--bg-raised);
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-secondary);
+  letter-spacing: 0.04em;
+}
+
 /* ======================== */
 /* SKELETON LOADING CARDS   */
 /* ======================== */
@@ -1595,46 +1626,204 @@ button {
   /* Hide the custom dot on mobile, use default touch behavior */
   #cursor-dot { display: none !important; }
   
-  /* App Nav */
+  /* ---- APP NAV ---- */
   #nav {
-    padding: 0 16px !important;
+    padding: 8px 12px !important;
     height: auto !important;
-    flex-wrap: wrap;
-    padding-top: 10px !important;
-    padding-bottom: 10px !important;
+    flex-wrap: nowrap;
+    gap: 8px;
   }
-  #nav input {
-    width: 150px !important;
+  /* Hide desktop genre filters, catalog/library tabs, and auth from nav on mobile */
+  #nav > div:last-child > div { display: none !important; }
+  #nav > div:last-child > button { display: none !important; }
+  /* Keep logo smaller */
+  #nav > div:first-child { font-size: 10px !important; letter-spacing: 0.15em !important; }
+  /* Compact search trigger */
+  #nav > div:nth-child(2) button {
+    padding: 6px 12px !important;
+    font-size: 12px !important;
+    border-radius: 8px !important;
+  }
+  /* Hide streak badge on mobile nav */
+  .streak-badge { display: none !important; }
+  /* Hide ⌘K hint on mobile */
+  .search-overlay-hint { display: none !important; }
+  
+  /* ---- HERO ---- */
+  #hero {
+    height: auto !important;
+    min-height: 100vh;
+    padding: 60px 0 40px !important;
+  }
+  #hero > div:nth-child(3) {
+    padding-left: 6vw !important;
+    padding-right: 6vw !important;
+  }
+  #hero h1 {
+    font-size: clamp(2.5rem, 12vw, 4rem) !important;
+  }
+  /* Hide ghost search button on mobile */
+  .btn-ghost { display: none !important; }
+  /* Trending strip mobile adjustments */
+  .trending-strip {
+    gap: 14px;
+  }
+  .trending-item img {
+    width: 60px;
+    height: 90px;
+  }
+  .trending-item span {
+    max-width: 60px;
+    font-size: 8px;
+  }
+  /* Hide SCROLL indicator on mobile */
+  #hero > div:nth-child(3) > div:last-child { display: none !important; }
+  
+  /* ---- CATALOG SECTION ---- */
+  #main-view {
+    padding: 40px 4vw 100px !important;
+    margin-top: 0 !important;
+  }
+  #main-view > div:first-child {
+    margin-bottom: 24px !important;
+  }
+  #main-view > div:first-child h2 {
+    font-size: clamp(1.5rem, 6vw, 2rem) !important;
   }
   
-  /* Detail panel */
-  .detail-panel {
-    flex-direction: column !important;
-    padding: 24px !important;
+  /* ---- BOOK CARD GRID ---- */
+  #main-view > div:nth-child(3),
+  #main-view > div:nth-child(4) {
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 12px !important;
+  }
+  
+  /* ---- BOOK CARDS ---- */
+  .book-card-tilt {
+    border-radius: 8px !important;
+  }
+  .book-card-tilt .card-cover-wrap img {
+    border-radius: 8px 8px 0 0;
+  }
+  .book-card-tilt > div:nth-child(2) {
+    padding: 10px !important;
+  }
+  .book-card-tilt h3 {
+    font-size: 13px !important;
+    -webkit-line-clamp: 2 !important;
+  }
+  .lang-badge { font-size: 7px !important; padding: 1px 5px !important; }
+  .popularity-bar { display: none !important; }
+  .card-progress-ring { width: 28px !important; height: 28px !important; }
+  
+  /* ---- DETAIL PANEL ---- */
+  /* Make it full screen on mobile */
+  #app > div:nth-child(4) > div:last-child {
+    height: 92vh !important;
+    padding: 24px 20px !important;
     gap: 20px !important;
-    height: 85vh !important;
+    flex-direction: column !important;
     overflow-y: auto !important;
-    align-items: center;
+    align-items: center !important;
   }
-  .detail-cover {
-    max-width: 160px !important;
+  /* Cover smaller on mobile */
+  #app > div:nth-child(4) > div:last-child > div:first-child {
+    flex: 0 0 auto !important;
+  }
+  #app > div:nth-child(4) > div:last-child > div:first-child img {
+    max-width: 180px !important;
+    max-height: 250px !important;
+    box-shadow: 10px 10px 20px rgba(0,0,0,0.4) !important;
+  }
+  /* Info section */
+  #app > div:nth-child(4) > div:last-child > div:nth-child(3) {
+    align-items: center !important;
+    text-align: center !important;
+    padding-bottom: 20px !important;
+  }
+  #app > div:nth-child(4) > div:last-child > div:nth-child(3) h2 {
+    font-size: 1.5rem !important;
+  }
+  #app > div:nth-child(4) > div:last-child > div:nth-child(3) .detail-tag {
+    font-size: 8px !important;
+    padding: 4px 8px !important;
+  }
+  /* Close button bigger touch target */
+  #app > div:nth-child(4) > div:last-child > button:first-child {
+    font-size: 28px !important;
+    padding: 8px !important;
+    top: 12px !important;
+    right: 12px !important;
   }
   
-  /* Reader adjustments */
+  /* ---- SEARCH OVERLAY ---- */
+  .search-overlay-backdrop {
+    padding-top: 5vh !important;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .search-overlay-modal {
+    max-width: 100% !important;
+    border-radius: 12px !important;
+  }
+  .search-overlay-input {
+    font-size: 16px !important; /* prevents iOS zoom */
+  }
+  .search-overlay-footer { display: none !important; }
+  
+  /* ---- GENRE SCROLL STRIP ---- */
+  .genre-scroll-strip {
+    padding: 0 4vw !important;
+    margin-top: -20px !important;
+  }
+  .genre-pill {
+    font-size: 9px !important;
+    padding: 5px 10px !important;
+    white-space: nowrap;
+  }
+  
+  /* ---- FOOTER ---- */
+  .site-footer {
+    padding: 40px 4vw 100px !important;
+  }
+  .footer-grid {
+    grid-template-columns: 1fr !important;
+    gap: 24px !important;
+  }
+  .footer-brand h3 { font-size: 1.3rem !important; }
+  .footer-bottom {
+    flex-direction: column !important;
+    gap: 8px !important;
+    text-align: center !important;
+  }
+  
+  /* ---- EMPTY STATE ---- */
+  .empty-state {
+    padding: 50px 20px !important;
+  }
+  .empty-state h3 { font-size: 1.1rem !important; }
+  
+  /* ---- READER ---- */
   .reader-topbar {
-    padding: 0 20px !important;
+    padding: 0 16px !important;
+    opacity: 1 !important;
   }
   .reader-settings {
-    right: 16px !important;
-    left: 16px !important;
-    top: 60px !important;
+    right: 12px !important;
+    left: 12px !important;
+    top: 56px !important;
   }
-  .reader-content h1 { font-size: 1.6em !important; margin-top: 2rem !important; }
-  .reader-content h2 { font-size: 1.3em !important; margin-top: 2rem !important; }
-  .reader-content p { text-indent: 1.2em !important; }
-  
-  /* Hide arrows in reader */
+  .reader-content h1 { font-size: 1.5em !important; margin-top: 1.5rem !important; }
+  .reader-content h2 { font-size: 1.2em !important; margin-top: 1.5rem !important; }
+  .reader-content p { text-indent: 1em !important; }
   .nav-arrow { display: none !important; }
+  .spread-spine { display: none !important; }
+  
+  /* ---- SKELETON CARDS ---- */
+  .skeleton-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 12px !important;
+  }
 }
 
 /* ======================== */

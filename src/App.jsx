@@ -446,7 +446,7 @@ function App() {
         <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
           
           <div style={{ display: 'flex', gap: '16px', alignItems: 'center', marginRight: '16px' }}>
-            <button className="mono" onClick={() => { setView('catalog'); window.scrollTo(0,0); }} style={{ opacity: view === 'catalog' ? 1 : 0.5, borderBottom: view === 'catalog' ? '1px solid var(--gold)' : 'none' }}>CATALOG</button>
+            <button className="mono" onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }} style={{ opacity: view === 'catalog' ? 1 : 0.5, borderBottom: view === 'catalog' ? '1px solid var(--gold)' : 'none' }}>CATALOG</button>
             <button className="mono" onClick={() => setView('library')} style={{ opacity: view === 'library' ? 1 : 0.5, borderBottom: view === 'library' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><Library size={14}/> MY LIBRARY</button>
           </div>
 
@@ -504,7 +504,7 @@ function App() {
               Every great book ever written. Free. Beautiful. Yours.
             </p>
             <div style={{ display: 'flex', gap: '16px', marginBottom: '32px' }}>
-              <button className="btn-primary" onClick={() => window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}>EXPLORE THE CATALOG &rarr;</button>
+              <button className="btn-primary" onClick={() => window.__lenis?.scrollTo(window.innerHeight, { immediate: false }) || window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}>EXPLORE THE CATALOG &rarr;</button>
               <button className="btn-ghost" onClick={() => setShowSearchOverlay(true)}>SEARCH &nbsp;⌘K</button>
             </div>
             {/* Trending Strip */}
@@ -548,7 +548,7 @@ function App() {
             <div className="empty-state-icon"><BookOpen size={32} /></div>
             <h3>Your Library is Empty</h3>
             <p>Start reading a book from the catalog and it will appear here so you can pick up right where you left off.</p>
-            <button className="btn-primary" onClick={() => { setView('catalog'); window.scrollTo(0,0); }}>DISCOVER YOUR FIRST BOOK &rarr;</button>
+            <button className="btn-primary" onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }}>DISCOVER YOUR FIRST BOOK &rarr;</button>
           </div>
         )}
         
@@ -834,16 +834,16 @@ function App() {
           </div>
           <div className="footer-col">
             <h4>Collections</h4>
-            <button onClick={() => { setGenre('fiction'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Fiction</button>
-            <button onClick={() => { setGenre('philosophy'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Philosophy</button>
-            <button onClick={() => { setGenre('poetry'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Poetry</button>
-            <button onClick={() => { setGenre('drama'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Drama</button>
+            <button onClick={() => { setGenre('fiction'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Fiction</button>
+            <button onClick={() => { setGenre('philosophy'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Philosophy</button>
+            <button onClick={() => { setGenre('poetry'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Poetry</button>
+            <button onClick={() => { setGenre('drama'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Drama</button>
           </div>
           <div className="footer-col">
             <h4>Discover</h4>
-            <button onClick={() => { setGenre('history'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>History</button>
-            <button onClick={() => { setGenre('science'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Science</button>
-            <button onClick={() => { setGenre('adventure'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Adventure</button>
+            <button onClick={() => { setGenre('history'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>History</button>
+            <button onClick={() => { setGenre('science'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Science</button>
+            <button onClick={() => { setGenre('adventure'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Adventure</button>
             <button onClick={() => setShowSearchOverlay(true)}>Search All</button>
           </div>
           <div className="footer-col">
@@ -861,7 +861,7 @@ function App() {
 
       {/* MOBILE BOTTOM NAV */}
       <nav className="mobile-bottom-nav">
-        <button className={`mobile-nav-item ${view === 'catalog' ? 'active' : ''}`} onClick={() => { setView('catalog'); window.scrollTo(0, 0); }}>
+        <button className={`mobile-nav-item ${view === 'catalog' ? 'active' : ''}`} onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }}>
           <Home size={20} />
           <span>Home</span>
         </button>
