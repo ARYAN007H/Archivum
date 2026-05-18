@@ -1,7 +1,77 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NativeReader from './components/NativeReader';
-import { Search, ChevronDown, User, Library } from 'lucide-react';
+import { Search, ChevronDown, User, Library, BookOpen, Home, Settings, ArrowRight, Command, CornerDownLeft, X } from 'lucide-react';
 import { supabase } from './supabaseClient';
+
+// ========== HELPER COMPONENTS ==========
+
+const SkeletonCard = () => (
+  <div className="book-card-skeleton">
+    <div className="skeleton-cover" />
+    <div className="skeleton-body">
+      <div className="skeleton-line short" />
+      <div className="skeleton-line" />
+      <div className="skeleton-line tiny" />
+    </div>
+  </div>
+);
+
+const ProgressRing = ({ percent }) => {
+  const r = 14, c = 2 * Math.PI * r;
+  return (
+    <svg className="card-progress-ring" viewBox="0 0 36 36">
+      <circle className="ring-bg" cx="18" cy="18" r={r} />
+      <circle className="ring-fill" cx="18" cy="18" r={r}
+        strokeDasharray={c} strokeDashoffset={c - (percent / 100) * c} />
+      <text className="ring-text" x="18" y="18">{percent}%</text>
+    </svg>
+  );
+};
+
+const cleanSubject = (sub) => {
+  return sub.split('--').map(s => s.trim()).filter(s => s.length > 0 && s.length < 30)[0] || sub.substring(0, 25);
+};
+
+const getReadingStreak = () => {
+  try {
+    const days = JSON.parse(localStorage.getItem('archivum_reading_days') || '[]');
+    const today = new Date().toDateString();
+    const uniqueDays = [...new Set(days)];
+    if (!uniqueDays.includes(today)) return uniqueDays.length > 0 ? uniqueDays.length : 0;
+    let streak = 0;
+    const d = new Date();
+    for (let i = 0; i < 365; i++) {
+      const ds = new Date(d - i * 86400000).toDateString();
+      if (uniqueDays.includes(ds)) streak++;
+      else if (i > 0) break;
+    }
+    return streak;
+  } catch { return 0; }
+};
+
+const recordReadingDay = () => {
+  try {
+    const days = JSON.parse(localStorage.getItem('archivum_reading_days') || '[]');
+    const today = new Date().toDateString();
+    if (!days.includes(today)) {
+      days.push(today);
+      if (days.length > 365) days.shift();
+      localStorage.setItem('archivum_reading_days', JSON.stringify(days));
+    }
+  } catch {}
+};
+
+const getReadingProgress = () => {
+  const progress = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith('archivum_progress_')) {
+      const bookId = key.replace('archivum_progress_', '');
+      progress[bookId] = parseInt(localStorage.getItem(key)) || 0;
+    }
+  }
+  return progress;
+};
 
 const generateCover = (title, author, id) => {
   const canvas = document.createElement('canvas');
@@ -68,6 +138,24 @@ function App() {
 
   const loaderRef = useRef(null);
   const cursorRef = useRef(null);
+
+  // Search Overlay (Cmd+K)
+  const [showSearchOverlay, setShowSearchOverlay] = useState(false);
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [activeSearchIndex, setActiveSearchIndex] = useState(0);
+
+  // Trending books for hero
+  const [trendingBooks, setTrendingBooks] = useState([]);
+
+  // Reading progress map { bookId: pageNum }
+  const [progressMap, setProgressMap] = useState({});
+
+  // Book-open cinematic transition
+  const [bookOpenAnim, setBookOpenAnim] = useState(null);
+
+  // Reading streak
+  const [streak, setStreak] = useState(0);
 
   useEffect(() => {
     if (supabase) {
@@ -231,6 +319,45 @@ function App() {
     return () => observer.disconnect();
   }, [loading, hasMore, fetchBooks]);
 
+  // Load trending books on mount
+  useEffect(() => {
+    fetch('https://gutendex.com/books/?sort=popular&page=1')
+      .then(r => r.json())
+      .then(data => setTrendingBooks(data.results?.slice(0, 8) || []))
+      .catch(() => {});
+  }, []);
+
+  // Load reading progress map and streak on mount
+  useEffect(() => {
+    setProgressMap(getReadingProgress());
+    setStreak(getReadingStreak());
+  }, []);
+
+  // Cmd+K keyboard shortcut
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setShowSearchOverlay(prev => !prev);
+      }
+      if (e.key === 'Escape') setShowSearchOverlay(false);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  // Search overlay handler
+  const handleOverlaySearch = useCallback(async (q) => {
+    if (!q.trim()) { setSearchResults([]); return; }
+    setSearchLoading(true);
+    try {
+      const res = await fetch(`https://gutendex.com/books/?search=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      setSearchResults(data.results?.slice(0, 8) || []);
+    } catch { setSearchResults([]); }
+    setSearchLoading(false);
+  }, []);
+
   const openBook = (book) => {
     setSelectedBook(book);
     document.body.style.overflow = 'hidden';
@@ -243,7 +370,15 @@ function App() {
   };
 
   const startReading = () => {
-    setReaderOpen(true);
+    recordReadingDay();
+    setStreak(getReadingStreak());
+    // Cinematic book-open transition
+    const coverUrl = selectedBook.formats['image/jpeg'] || generateCover(selectedBook.title, selectedBook.authors?.[0]?.name, selectedBook.id);
+    setBookOpenAnim(coverUrl);
+    setTimeout(() => {
+      setBookOpenAnim(null);
+      setReaderOpen(true);
+    }, 800);
   };
 
   if (readerOpen && selectedBook) {
@@ -303,18 +438,10 @@ function App() {
           ARCHIVUM <span style={{ width: 6, height: 6, background: 'var(--ember)', borderRadius: '50%' }}></span>
         </div>
         <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
-          <Search size={16} color="var(--text-muted)" />
-          <input 
-            type="text" 
-            placeholder="search titles, authors, subjects..." 
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            style={{
-              background: 'none', border: 'none', borderBottom: '1px solid var(--text-muted)',
-              color: 'var(--text-primary)', fontFamily: 'Libre Baskerville, serif', fontSize: '16px',
-              padding: '8px 0', width: '300px', textAlign: 'center', outline: 'none'
-            }}
-          />
+          <button onClick={() => setShowSearchOverlay(true)} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 20px', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--text-muted)', fontFamily: 'Libre Baskerville, serif', fontSize: '14px', transition: 'border-color 0.2s' }}>
+            <Search size={14} /> Search books... <span className="search-overlay-hint" style={{ marginLeft: '8px' }}>⌘K</span>
+          </button>
+          {streak > 0 && <span className="streak-badge"><span className="streak-fire">🔥</span> {streak} DAY STREAK</span>}
         </div>
         <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
           
@@ -373,12 +500,27 @@ function App() {
               <em style={{ marginLeft: '8%' }}>Thousand</em><br />
               Stories.
             </h1>
-            <p className="body-text" style={{ fontSize: '18px', color: 'var(--text-secondary)', maxWidth: '400px', marginBottom: '40px' }}>
+            <p className="body-text" style={{ fontSize: '18px', color: 'var(--text-secondary)', maxWidth: '400px', marginBottom: '24px' }}>
               Every great book ever written. Free. Beautiful. Yours.
             </p>
-            <div style={{ display: 'flex', gap: '16px' }}>
+            <div style={{ display: 'flex', gap: '16px', marginBottom: '32px' }}>
               <button className="btn-primary" onClick={() => window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}>EXPLORE THE CATALOG &rarr;</button>
+              <button className="btn-ghost" onClick={() => setShowSearchOverlay(true)}>SEARCH &nbsp;⌘K</button>
             </div>
+            {/* Trending Strip */}
+            {trendingBooks.length > 0 && (
+              <div style={{ maxWidth: '600px' }}>
+                <span className="mono" style={{ color: 'var(--text-muted)', fontSize: '10px' }}>POPULAR RIGHT NOW</span>
+                <div className="trending-strip">
+                  {trendingBooks.map(tb => (
+                    <div key={tb.id} className="trending-item" onClick={(e) => { e.stopPropagation(); openBook(tb); }}>
+                      <img src={tb.formats['image/jpeg'] || generateCover(tb.title, tb.authors?.[0]?.name, tb.id)} alt={tb.title} />
+                      <span>{tb.title.split(':')[0].substring(0, 18)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div style={{ position: 'absolute', bottom: '40px', right: '40px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', opacity: 0.5 }}>
               <ChevronDown size={20} className="bounce" />
               <span className="mono">SCROLL</span>
@@ -402,63 +544,86 @@ function App() {
         )}
 
         {view === 'library' && !libraryLoading && libraryBooks.length === 0 && (
-          <div className="mono text-secondary" style={{ textAlign: 'center', padding: '80px 20px', border: '1px dashed var(--border)', borderRadius: '8px' }}>
-            YOUR LIBRARY IS EMPTY.<br/><br/>
-            START READING A BOOK FROM THE CATALOG TO ADD IT HERE.
+          <div className="empty-state">
+            <div className="empty-state-icon"><BookOpen size={32} /></div>
+            <h3>Your Library is Empty</h3>
+            <p>Start reading a book from the catalog and it will appear here so you can pick up right where you left off.</p>
+            <button className="btn-primary" onClick={() => { setView('catalog'); window.scrollTo(0,0); }}>DISCOVER YOUR FIRST BOOK &rarr;</button>
           </div>
         )}
         
         <div style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '24px'
         }}>
+          {/* Skeleton cards during loading */}
+          {loading && books.length === 0 && view === 'catalog' && (
+            Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={`sk-${i}`} />)
+          )}
           {(view === 'catalog' ? books : libraryBooks).map(book => {
             let authorName = book.authors?.[0]?.name || 'Unknown';
             let coverUrl = book.formats['image/jpeg'] || generateCover(book.title, authorName, book.id);
+            const lang = (book.languages?.[0] || 'en').toUpperCase();
+            const subjectClean = book.subjects?.[0] ? cleanSubject(book.subjects[0]) : null;
+            const bookProgress = progressMap[book.id];
+            const popPercent = Math.min(100, Math.round((book.download_count / 80000) * 100));
             
             return (
               <div 
-                key={book.id} 
+                key={book.id}
+                className="book-card-tilt"
                 onClick={() => openBook(book)}
                 style={{
-                  background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: '4px',
+                  background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: '6px',
                   overflow: 'hidden', cursor: 'none', display: 'flex', flexDirection: 'column',
                   transform: selectedBook 
                     ? (selectedBook.id === book.id ? 'scale(1.02)' : 'scale(0.92)') 
                     : 'scale(1) translateY(0)',
                   opacity: selectedBook ? (selectedBook.id === book.id ? 1 : 0.3) : 1,
-                  transition: 'transform 0.3s ease, opacity 0.3s ease, box-shadow 0.3s',
-                  pointerEvents: selectedBook ? 'none' : 'auto'
+                  transition: 'transform 0.45s var(--ease-out-expo), opacity 0.35s ease, box-shadow 0.45s var(--ease-out-expo)',
+                  pointerEvents: selectedBook ? 'none' : 'auto',
+                  animation: 'fadeInUp 0.5s var(--ease-out-expo) both'
                 }}
                 onMouseEnter={e => {
                   if (selectedBook) return;
-                  e.currentTarget.style.transform = 'translateY(-10px)';
-                  e.currentTarget.style.boxShadow = '0 20px 40px rgba(0,0,0,0.5)';
+                  e.currentTarget.style.transform = 'translateY(-12px) scale(1.02)';
+                  e.currentTarget.style.boxShadow = '0 24px 48px rgba(0,0,0,0.55), 0 0 0 1px rgba(224,78,42,0.12)';
                   document.body.classList.add('cursor-read');
                 }}
                 onMouseLeave={e => {
                   if (selectedBook) return;
-                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.transform = 'translateY(0) scale(1)';
                   e.currentTarget.style.boxShadow = 'none';
                   document.body.classList.remove('cursor-read');
                 }}
               >
-                <img src={coverUrl} alt="Cover" style={{ width: '100%', aspectRatio: '2/3', objectFit: 'cover', background: 'var(--bg-raised)' }} loading="lazy" />
+                <div className="card-cover-wrap">
+                  <img src={coverUrl} alt="Cover" style={{ width: '100%', aspectRatio: '2/3', objectFit: 'cover', background: 'var(--bg-raised)' }} loading="lazy" />
+                  {bookProgress !== undefined && <ProgressRing percent={Math.min(99, bookProgress)} />}
+                </div>
                 <div style={{ padding: '16px', flex: 1, display: 'flex', flexDirection: 'column' }}>
-                  <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', color: 'var(--text-secondary)' }}>
-                    <span>{book.id.toString().padStart(5, '0')}</span>
-                    <span>{book.subjects?.[0]?.split(' ')[0].toUpperCase() || 'LIT'}</span>
+                  <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                    <span className="lang-badge">{lang}</span>
+                    {subjectClean && <span style={{ color: 'var(--text-muted)', fontSize: '9px' }}>{subjectClean.toUpperCase()}</span>}
                   </div>
                   <h3 className="display" style={{ fontSize: '17px', marginBottom: '4px', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{book.title}</h3>
                   <div className="mono" style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>{authorName.split(',')[0]}</div>
                   <div style={{ height: '1px', background: 'var(--border)', margin: 'auto 0 12px' }}></div>
                   <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ transition: 'color 0.3s' }}>READ &rarr;</span>
-                    <span className="text-secondary">{book.download_count > 1000 ? (book.download_count/1000).toFixed(1)+'k' : book.download_count} reads</span>
+                    <span style={{ transition: 'color 0.3s, letter-spacing 0.3s' }}>READ &rarr;</span>
+                    <div className="popularity-bar">
+                      <div className="popularity-bar-track"><div className="popularity-bar-fill" style={{ width: `${popPercent}%` }} /></div>
+                      <span className="text-secondary" style={{ fontSize: '9px' }}>{book.download_count > 1000 ? (book.download_count/1000).toFixed(1)+'k' : book.download_count}</span>
+                    </div>
                   </div>
                 </div>
+                {bookProgress !== undefined && <div className="card-progress-bar"><div className="card-progress-bar-fill" style={{ width: `${Math.min(99, bookProgress)}%` }} /></div>}
               </div>
             )
           })}
+          {/* Skeleton cards during infinite scroll */}
+          {loading && books.length > 0 && view === 'catalog' && (
+            Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={`sk-more-${i}`} />)
+          )}
         </div>
         
         {view === 'catalog' && (
@@ -499,22 +664,36 @@ function App() {
               </div>
 
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', overflowY: 'auto', paddingBottom: '40px' }}>
-                <div className="mono text-secondary">WORK № {selectedBook.id.toString().padStart(5, '0')}</div>
+                <div className="mono text-secondary" style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+                  <span>WORK № {selectedBook.id.toString().padStart(5, '0')}</span>
+                  <span className="lang-badge">{(selectedBook.languages?.[0] || 'en').toUpperCase()}</span>
+                  <span>~{Math.max(30, Math.round(selectedBook.download_count / 500))} MIN READ</span>
+                </div>
                 <h2 className="display" style={{ fontSize: 'clamp(1.8rem, 3vw, 3rem)', margin: '12px 0 8px' }}>{selectedBook.title}</h2>
                 <div className="mono" style={{ color: 'var(--gold)' }}>{selectedBook.authors?.[0]?.name || 'Unknown'}</div>
+                {selectedBook.authors?.[0]?.birth_year && (
+                  <div className="mono" style={{ color: 'var(--text-muted)', fontSize: '10px', marginTop: '4px' }}>{selectedBook.authors[0].birth_year}–{selectedBook.authors[0].death_year || 'present'}</div>
+                )}
                 
                 <hr style={{ border: 'none', height: '1px', background: 'var(--ember)', width: '40px', margin: '24px 0' }} />
                 
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '24px' }}>
-                  {selectedBook.subjects?.slice(0, 4).map(sub => (
-                    <span key={sub} style={{ background: 'var(--bg-raised)', padding: '6px 12px', borderRadius: '20px', fontFamily: 'JetBrains Mono', fontSize: '10px', color: 'var(--text-secondary)' }}>
-                      {sub}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '16px' }}>
+                  {selectedBook.subjects?.slice(0, 6).map(sub => (
+                    <span key={sub} className="detail-tag">
+                      {cleanSubject(sub)}
                     </span>
                   ))}
                 </div>
+                {selectedBook.bookshelves?.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '16px' }}>
+                    {selectedBook.bookshelves.slice(0, 3).map(bs => (
+                      <span key={bs} className="mono" style={{ fontSize: '9px', color: 'var(--gold)', padding: '3px 8px', border: '1px solid rgba(191,155,90,0.2)', borderRadius: '8px' }}>{bs}</span>
+                    ))}
+                  </div>
+                )}
                 
-                <div className="mono text-secondary">{selectedBook.download_count.toLocaleString()} readers</div>
-                <div style={{ flex: 1, minHeight: '40px' }}></div>
+                <div className="mono text-secondary" style={{ marginBottom: '8px' }}>{selectedBook.download_count.toLocaleString()} readers worldwide</div>
+                <div style={{ flex: 1, minHeight: '24px' }}></div>
                 
                 <button className="btn-primary" onClick={startReading} style={{ width: '100%', fontSize: '16px', padding: '18px', marginBottom: '16px' }}>
                   OPEN &amp; READ THIS BOOK &rarr;
@@ -547,6 +726,158 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* CMD+K SEARCH OVERLAY */}
+      {showSearchOverlay && (
+        <div className="search-overlay-backdrop" onClick={() => setShowSearchOverlay(false)}>
+          <div className="search-overlay-modal" onClick={e => e.stopPropagation()}>
+            <div className="search-overlay-input-wrap">
+              <Search size={20} />
+              <input
+                className="search-overlay-input"
+                autoFocus
+                type="text"
+                placeholder="Search 70,000 books..."
+                value={query}
+                onChange={e => { setQuery(e.target.value); handleOverlaySearch(e.target.value); }}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') setShowSearchOverlay(false);
+                  if (e.key === 'ArrowDown') setActiveSearchIndex(i => Math.min(i + 1, searchResults.length - 1));
+                  if (e.key === 'ArrowUp') setActiveSearchIndex(i => Math.max(i - 1, 0));
+                  if (e.key === 'Enter' && searchResults[activeSearchIndex]) {
+                    openBook(searchResults[activeSearchIndex]);
+                    setShowSearchOverlay(false);
+                  }
+                }}
+              />
+              <span className="search-overlay-hint">ESC</span>
+            </div>
+            <div className="search-overlay-results">
+              {searchLoading && <div className="search-overlay-empty"><div className="mono text-secondary">SEARCHING...</div></div>}
+              {!searchLoading && searchResults.length === 0 && query && (
+                <div className="search-overlay-empty">
+                  <div className="mono text-secondary">NO RESULTS FOR "{query.toUpperCase()}"</div>
+                </div>
+              )}
+              {!searchLoading && searchResults.map((book, idx) => (
+                <div
+                  key={book.id}
+                  className={`search-result-item ${idx === activeSearchIndex ? 'active' : ''}`}
+                  onClick={() => { openBook(book); setShowSearchOverlay(false); }}
+                  onMouseEnter={() => setActiveSearchIndex(idx)}
+                >
+                  <img src={book.formats['image/jpeg'] || generateCover(book.title, book.authors?.[0]?.name, book.id)} alt="" />
+                  <div className="search-result-info">
+                    <div className="search-result-title">{book.title}</div>
+                    <div className="search-result-author">{book.authors?.[0]?.name || 'Unknown'}</div>
+                  </div>
+                  <ArrowRight size={14} style={{ color: 'var(--text-muted)' }} />
+                </div>
+              ))}
+              {!query && !searchLoading && (
+                <div className="search-overlay-empty">
+                  <div className="mono text-muted" style={{ fontSize: '11px' }}>TYPE TO SEARCH TITLES, AUTHORS, SUBJECTS...</div>
+                </div>
+              )}
+            </div>
+            <div className="search-overlay-footer">
+              <span><kbd>↑↓</kbd> Navigate</span>
+              <span><kbd>↵</kbd> Open</span>
+              <span><kbd>ESC</kbd> Close</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* BOOK OPEN CINEMATIC TRANSITION */}
+      {bookOpenAnim && (
+        <div className="book-open-transition">
+          <img src={bookOpenAnim} className="book-open-cover" alt="" style={{ width: '200px', aspectRatio: '2/3', objectFit: 'cover' }} />
+        </div>
+      )}
+
+      {/* GENRE SCROLL STRIP (visible at catalog section heading) */}
+      {view === 'catalog' && (
+        <div className="genre-scroll-strip" style={{ padding: '0 5vw', marginTop: '-40px', marginBottom: '20px' }}>
+          {['', 'fiction', 'drama', 'poetry', 'philosophy', 'history', 'science', 'adventure'].map(g => (
+            <button
+              key={g}
+              className={`genre-pill ${genre === g ? 'active' : ''}`}
+              onClick={() => setGenre(g)}
+            >
+              {g ? g.toUpperCase() : 'ALL'}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* FOOTER */}
+      <footer className="site-footer">
+        <div className="footer-grid">
+          <div className="footer-brand">
+            <h3>Archivum</h3>
+            <p>A beautiful, distraction-free reader for 70,000+ free books from Project Gutenberg.</p>
+            <div className="footer-stats">
+              <div className="footer-stat">
+                <span className="footer-stat-value">70K+</span>
+                <span className="footer-stat-label">Books</span>
+              </div>
+              <div className="footer-stat">
+                <span className="footer-stat-value">Free</span>
+                <span className="footer-stat-label">Forever</span>
+              </div>
+              {streak > 0 && <div className="footer-stat">
+                <span className="footer-stat-value">{streak}</span>
+                <span className="footer-stat-label">Day Streak</span>
+              </div>}
+            </div>
+          </div>
+          <div className="footer-col">
+            <h4>Collections</h4>
+            <button onClick={() => { setGenre('fiction'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Fiction</button>
+            <button onClick={() => { setGenre('philosophy'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Philosophy</button>
+            <button onClick={() => { setGenre('poetry'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Poetry</button>
+            <button onClick={() => { setGenre('drama'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Drama</button>
+          </div>
+          <div className="footer-col">
+            <h4>Discover</h4>
+            <button onClick={() => { setGenre('history'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>History</button>
+            <button onClick={() => { setGenre('science'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Science</button>
+            <button onClick={() => { setGenre('adventure'); setView('catalog'); window.scrollTo(0, window.innerHeight); }}>Adventure</button>
+            <button onClick={() => setShowSearchOverlay(true)}>Search All</button>
+          </div>
+          <div className="footer-col">
+            <h4>About</h4>
+            <a href="https://gutenberg.org" target="_blank" rel="noreferrer">Project Gutenberg</a>
+            <a href="https://gutenberg.org/help/volunteers/" target="_blank" rel="noreferrer">Volunteer</a>
+            <a href="https://gutenberg.org/donate/" target="_blank" rel="noreferrer">Donate</a>
+          </div>
+        </div>
+        <div className="footer-bottom">
+          <span>ARCHIVUM © {new Date().getFullYear()}</span>
+          <span>POWERED BY PROJECT GUTENBERG</span>
+        </div>
+      </footer>
+
+      {/* MOBILE BOTTOM NAV */}
+      <nav className="mobile-bottom-nav">
+        <button className={`mobile-nav-item ${view === 'catalog' ? 'active' : ''}`} onClick={() => { setView('catalog'); window.scrollTo(0, 0); }}>
+          <Home size={20} />
+          <span>Home</span>
+        </button>
+        <button className={`mobile-nav-item`} onClick={() => setShowSearchOverlay(true)}>
+          <Search size={20} />
+          <span>Search</span>
+        </button>
+        <button className={`mobile-nav-item ${view === 'library' ? 'active' : ''}`} onClick={() => setView('library')}>
+          <Library size={20} />
+          <span>Library</span>
+        </button>
+        <button className={`mobile-nav-item`} onClick={() => user ? handleLogout() : setShowAuthModal(true)}>
+          <User size={20} />
+          <span>{user ? 'Account' : 'Sign In'}</span>
+        </button>
+      </nav>
     </div>
   );
 }
