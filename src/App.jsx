@@ -145,7 +145,7 @@ const normalizeIABook = (doc) => {
   };
 };
 
-const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '') => {
+const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genreFilter = '') => {
   // Filter for actual books: require 'texts' mediatype + book-related collections
   // Exclude known non-book collections (policies, reports, government docs)
   let q = 'mediatype:texts AND (collection:opensource OR collection:books OR collection:gutenberg OR collection:additional_collections)';
@@ -162,6 +162,10 @@ const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '') => {
   } else {
     // Default: popular Hindi + multilingual literature
     if (!langFilter) q += ' AND language:(Hindi OR hin OR English OR eng)';
+  }
+  
+  if (genreFilter) {
+    q += ` AND subject:(${genreFilter})`;
   }
 
   const rows = 20;
@@ -312,6 +316,7 @@ function App() {
 
   const loaderRef = useRef(null);
   const cursorRef = useRef(null);
+  const currentFetchId = useRef(0);
 
   // Search Overlay (Cmd+K)
   const [showSearchOverlay, setShowSearchOverlay] = useState(false);
@@ -451,7 +456,11 @@ function App() {
   }, []);
 
   const fetchBooks = useCallback(async (isLoadMore = false) => {
-    if (loading || (!hasMore && isLoadMore)) return;
+    if (isLoadMore && loading) return;
+    if (isLoadMore && !hasMore) return;
+    
+    const fetchId = ++currentFetchId.current;
+    
     setLoading(true);
     
     try {
@@ -479,7 +488,7 @@ function App() {
       // Internet Archive fetch (always include for mixed/hindi)
       if (langFilter !== 'en' || !langFilter) {
         fetchers.push(
-          fetchIABooks(query || '', currentIAPage, langFilter).then(data => ({
+          fetchIABooks(query || '', currentIAPage, langFilter, genre).then(data => ({
             source: 'archive',
             results: data.results || [],
             hasMore: data.hasMore,
@@ -488,6 +497,7 @@ function App() {
       }
 
       const results = await Promise.all(fetchers);
+      if (fetchId !== currentFetchId.current) return;
       
       // Merge results: interleave Gutenberg and IA books
       const gutResult = results.find(r => r.source === 'gutenberg');
