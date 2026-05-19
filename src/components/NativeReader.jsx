@@ -58,12 +58,12 @@ const stripGutenbergBoilerplate = (doc) => {
 
 const fetchWithProxy = async (url, responseType = 'text') => {
   const proxies = [
-    (u) => `/api/proxy?url=${encodeURIComponent(u)}`,
+    (u) => window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? null : `/api/proxy?url=${encodeURIComponent(u)}`,
     (u) => u, // try direct first
     (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
     (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-  ];
+  ].filter(Boolean);
   
   for (const makeUrl of proxies) {
     try {

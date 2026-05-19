@@ -154,12 +154,22 @@ const DynamicCover = ({ book, style, className }) => {
     }
     return null;
   });
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (coverUrl || book._source !== 'archive') return;
 
     let isMounted = true;
     const cacheKey = `cover_${book._iaIdentifier}`;
+    
+    // For IA books, default to their image service
+    if (book._iaIdentifier) {
+      const iaCover = `https://archive.org/services/img/${book._iaIdentifier}`;
+      setCoverUrl(iaCover);
+      localStorage.setItem(cacheKey, iaCover);
+      return;
+    }
+
     const authorQuery = book.authors?.[0]?.name ? `&author=${encodeURIComponent(book.authors[0].name)}` : '';
     const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(book.title)}${authorQuery}&fields=cover_i&limit=1`;
     
@@ -173,7 +183,6 @@ const DynamicCover = ({ book, style, className }) => {
           setCoverUrl(finalUrl);
           localStorage.setItem(cacheKey, finalUrl);
         } else {
-          // Explicitly mark as not found to fallback to generateCover
           localStorage.setItem(cacheKey, 'notfound');
         }
       })
@@ -185,7 +194,19 @@ const DynamicCover = ({ book, style, className }) => {
   const fallback = generateCover(book.title, book.authors?.[0]?.name || 'Unknown', book.id);
   const finalSrc = coverUrl && coverUrl !== 'notfound' ? coverUrl : fallback;
 
-  return <img src={finalSrc} alt={book.title} style={style} className={className} loading="lazy" />;
+  return (
+    <div style={{ position: 'relative', display: 'flex', ...style }} className={className}>
+      {loading && <div className="image-shimmer" style={{ position: 'absolute', inset: 0, borderRadius: style?.borderRadius || 0 }} aria-hidden="true" />}
+      <img 
+        src={finalSrc} 
+        alt={book.title} 
+        style={{ width: '100%', height: '100%', objectFit: style?.objectFit || 'cover', borderRadius: style?.borderRadius || 0, display: 'block' }} 
+        loading="lazy" 
+        onLoad={() => setLoading(false)}
+        onError={() => setLoading(false)}
+      />
+    </div>
+  );
 };
 
 // ========== INTERNET ARCHIVE API ==========
@@ -371,6 +392,16 @@ function App() {
   const [selectedBook, setSelectedBook] = useState(null);
   const [readerOpen, setReaderOpen] = useState(false);
   const [navVisible, setNavVisible] = useState(false);
+  const [detailAnim, setDetailAnim] = useState(false);
+
+  const [toasts, setToasts] = useState([]);
+  const addToast = useCallback((message) => {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, message }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 3000);
+  }, []);
 
   // Library State
   const [view, setView] = useState('catalog'); // 'catalog' | 'library' | 'saved' | 'stats'
@@ -390,6 +421,7 @@ function App() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
 
   const loaderRef = useRef(null);
   const cursorRef = useRef(null);
@@ -400,6 +432,7 @@ function App() {
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Trending books for hero
   const [trendingBooks, setTrendingBooks] = useState([]);
@@ -424,20 +457,23 @@ function App() {
   const [iaPage, setIaPage] = useState(1);
 
   // Save/unsave book toggle
-  const toggleSaveBook = (book, e) => {
-    if (e) { e.stopPropagation(); e.preventDefault(); }
-    const id = book.id;
-    const isSaved = savedBooks.some(b => b.id === id);
-    let newSaved;
+  const toggleSaveBook = async (book, e) => {
+    e.stopPropagation();
+    
+    const isSaved = isBookSaved(book.id);
     if (isSaved) {
-      newSaved = savedBooks.filter(b => b.id !== id);
+      const newSaved = savedBooks.filter(b => b.id !== book.id);
+      setSavedBooks(newSaved);
+      localStorage.setItem('archivum_saved_books', JSON.stringify(newSaved));
+      addToast("Removed from Saved.");
     } else {
-      newSaved = [...savedBooks, { id: book.id, title: book.title, authors: book.authors, formats: book.formats, languages: book.languages, subjects: book.subjects, download_count: book.download_count, _source: book._source, _iaIdentifier: book._iaIdentifier, savedAt: Date.now() }];
-      setJustSavedId(id);
-      setTimeout(() => setJustSavedId(null), 500);
+      const newSaved = [...savedBooks, { id: book.id, title: book.title, authors: book.authors, formats: book.formats, languages: book.languages, subjects: book.subjects, download_count: book.download_count, _source: book._source, _iaIdentifier: book._iaIdentifier, savedAt: Date.now() }];
+      setSavedBooks(newSaved);
+      localStorage.setItem('archivum_saved_books', JSON.stringify(newSaved));
+      setJustSavedId(book.id);
+      setTimeout(() => setJustSavedId(null), 1500);
+      addToast("Book saved to Library.");
     }
-    setSavedBooks(newSaved);
-    localStorage.setItem('archivum_saved_books', JSON.stringify(newSaved));
   };
 
   const isBookSaved = (bookId) => savedBooks.some(b => b.id === bookId);
@@ -810,11 +846,15 @@ function App() {
     setSelectedBook(book);
     document.body.style.overflow = 'hidden';
     document.body.classList.remove('cursor-read');
+    setTimeout(() => setDetailAnim(true), 10);
   };
 
   const closeBook = () => {
-    setSelectedBook(null);
-    document.body.style.overflow = 'auto';
+    setDetailAnim(false);
+    setTimeout(() => {
+      setSelectedBook(null);
+      document.body.style.overflow = 'auto';
+    }, 400);
   };
 
   const startReading = () => {
@@ -850,29 +890,38 @@ function App() {
 
   const handleAuth = async (e) => {
     e.preventDefault();
+    setAuthLoading(true);
     setAuthError('');
     if (!supabase) {
-      setAuthError('Authentication service is not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.');
+      setAuthError('Authentication service is not configured.');
+      setAuthLoading(false);
       return;
     }
     try {
-      if (authMode === 'signup') {
+      const isSignUp = authMode === 'signup';
+      if (isSignUp) {
         const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
         if (error) throw error;
         setShowAuthModal(false);
+        addToast("Account created successfully.");
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
         if (error) throw error;
         setShowAuthModal(false);
+        addToast("Signed in successfully.");
       }
     } catch (err) {
-      setAuthError(err.message);
+      setAuthError(err.message || 'An error occurred.');
+      addToast("Authentication failed.");
+    } finally {
+      setAuthLoading(false);
     }
   };
 
   const handleLogout = async () => {
     if (!supabase) return;
     await supabase.auth.signOut();
+    addToast("Logged out successfully.");
   };
 
   return (
@@ -896,18 +945,34 @@ function App() {
           
           <div style={{ width: '1px', height: '20px', background: 'var(--border)' }} />
 
-          <button onClick={() => setShowSearchOverlay(true)} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', transition: 'color 0.2s' }}>
-            <Search size={16} /> <span className="search-overlay-hint">⌘K</span>
+          <button onClick={() => setShowSearchOverlay(true)} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', transition: 'color 0.2s' }} aria-label="Search catalog">
+            <Search size={16} aria-hidden="true" /> <span className="search-overlay-hint">⌘K</span>
           </button>
           
           {user ? (
             <button onClick={handleLogout} className="mono" style={{ color: 'var(--text-muted)' }}>LOGOUT</button>
           ) : (
             <button className="mono" onClick={() => setShowAuthModal(true)} style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)' }}>
-              <User size={14} /> SIGN IN
+              <User size={14} aria-hidden="true" /> SIGN IN
             </button>
           )}
         </div>
+      </div>
+
+      <div className="toast-container">
+        <AnimatePresence>
+          {toasts.map(t => (
+            <motion.div
+              key={t.id}
+              className="toast"
+              initial={{ opacity: 0, y: 50, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.2 } }}
+            >
+              {t.message}
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
 
       {/* HERO - Only show in catalog view */}
@@ -1074,7 +1139,6 @@ function App() {
           )}
           {(view === 'catalog' ? books : view === 'saved' ? savedBooks : libraryBooks).map(book => {
             let authorName = book.authors?.[0]?.name || 'Unknown';
-            let coverUrl = book.formats['image/jpeg'] || generateCover(book.title, authorName, book.id);
             const lang = (book.languages?.[0] || 'en').toUpperCase();
             const subjectClean = book.subjects?.[0] ? cleanSubject(book.subjects[0]) : null;
             const bookProgress = progressMap[book.id];
@@ -1110,9 +1174,9 @@ function App() {
                 }}
               >
                 <div className="card-cover-wrap">
-                  <DynamicCover book={book} style={{ width: '100%', aspectRatio: '2/3', objectFit: 'cover', background: 'var(--bg-raised)' }} />
-                  <button className={`save-btn ${isBookSaved(book.id) ? 'saved' : ''} ${justSavedId === book.id ? 'just-saved' : ''}`} onClick={(e) => toggleSaveBook(book, e)}>
-                    <Heart size={14} fill={isBookSaved(book.id) ? 'currentColor' : 'none'} />
+                  <DynamicCover book={book} style={{ width: '100%', aspectRatio: '2/3', background: 'var(--bg-raised)' }} />
+                  <button className={`save-btn ${isBookSaved(book.id) ? 'saved' : ''} ${justSavedId === book.id ? 'just-saved' : ''}`} onClick={(e) => toggleSaveBook(book, e)} aria-label={isBookSaved(book.id) ? "Remove from saved" : "Save book"}>
+                    <Heart size={14} fill={isBookSaved(book.id) ? 'currentColor' : 'none'} aria-hidden="true" />
                   </button>
                   {bookProgress !== undefined && <ProgressRing percent={Math.min(99, bookProgress)} />}
                 </div>
@@ -1171,8 +1235,8 @@ function App() {
           display: 'flex', padding: '60px', gap: '60px'
         }}>
           {selectedBook && (
-            <>
-              <button onClick={closeBook} style={{ position: 'absolute', top: '24px', right: '24px', fontSize: '32px', color: 'var(--text-secondary)' }}>&times;</button>
+            <div className="detail-panel" style={{ opacity: detailAnim ? 1 : 0, transform: detailAnim ? 'translateY(0)' : 'translateY(20px)', transition: 'opacity 0.4s ease, transform 0.4s ease' }}>
+              <button onClick={closeBook} style={{ position: 'absolute', top: '24px', right: '24px', fontSize: '32px', color: 'var(--text-secondary)' }} aria-label="Close details">&times;</button>
               
               <div style={{ flex: '0 0 300px', display: 'flex', flexDirection: 'column', gap: '24px', alignItems: 'center' }}>
                 <DynamicCover 
@@ -1223,7 +1287,7 @@ function App() {
                 </div>
                 <a href={selectedBook._source === 'archive' ? `https://archive.org/details/${selectedBook._iaIdentifier}` : `https://gutenberg.org/ebooks/${selectedBook.id}`} target="_blank" rel="noreferrer" className="mono text-secondary" style={{ textDecoration: 'none' }}>{selectedBook._source === 'archive' ? 'VIEW ON ARCHIVE.ORG' : 'VIEW ON GUTENBERG'} &nearr;</a>
               </div>
-            </>
+            </div>
           )}
         </div>
       </div>
@@ -1238,7 +1302,7 @@ function App() {
             <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <input className="auth-input" type="email" placeholder="Email" value={authEmail} onChange={e=>setAuthEmail(e.target.value)} required />
               <input className="auth-input" type="password" placeholder="Password" value={authPassword} onChange={e=>setAuthPassword(e.target.value)} required />
-              <button type="submit" className="btn-primary" style={{ padding: '14px' }}>{authMode === 'login' ? 'LOGIN' : 'SIGN UP'}</button>
+              <button type="submit" className="btn-primary" style={{ padding: '14px' }}>{authLoading ? '...' : (authMode === 'login' ? 'LOGIN' : 'SIGN UP')}</button>
             </form>
             <div className="mono text-secondary" style={{ textAlign: 'center', fontSize: '11px' }}>
               {authMode === 'login' ? 'New here? ' : 'Already have an account? '}

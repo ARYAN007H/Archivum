@@ -31,6 +31,12 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+*:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+
 body {
   background-color: var(--bg-void);
   color: var(--text-primary);
@@ -142,6 +148,11 @@ body.cursor-hidden { cursor: auto; }
   justify-content: center;
   z-index: 100;
   pointer-events: none; /* Let clicks pass through wrap */
+}
+@media (max-width: 768px) {
+  .floating-nav-wrap {
+    display: none;
+  }
 }
 .floating-nav {
   pointer-events: auto;
@@ -320,9 +331,32 @@ button {
   border-bottom: 1px solid var(--border);
 }
 
-.search-overlay-input-wrap svg {
+.search-overlay-input-wrap svg.search-icon {
   color: var(--text-muted);
   flex-shrink: 0;
+}
+
+.search-clear-btn {
+  color: var(--text-muted);
+  transition: color 0.2s;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+.search-clear-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-raised);
+}
+
+.search-spinner {
+  animation: spin 1s linear infinite;
+  color: var(--ember);
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .search-overlay-input {
@@ -997,6 +1031,44 @@ button {
   font-family: 'Playfair Display', serif;
   font-size: 1.5rem;
   margin-bottom: 16px;
+}
+
+/* ======================== */
+/* TOAST NOTIFICATIONS      */
+/* ======================== */
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: none;
+}
+@media (max-width: 768px) {
+  .toast-container {
+    bottom: 80px; /* Above mobile nav */
+    left: 24px;
+    right: 24px;
+    align-items: center;
+  }
+}
+.toast {
+  background: rgba(14, 14, 21, 0.95);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  pointer-events: auto;
 }
 
 .onboarding-card p {
@@ -2256,6 +2328,9 @@ button {
 /* MOBILE OPTIMIZATIONS     */
 /* ======================== */
 @media (max-width: 768px) {
+  /* Hide desktop floating nav on mobile */
+  .floating-nav-wrap { display: none !important; }
+
   /* Hide the custom dot on mobile, use default touch behavior */
   #cursor-dot { display: none !important; }
   
@@ -2351,7 +2426,7 @@ button {
   
   /* ---- DETAIL PANEL ---- */
   /* Make it full screen on mobile */
-  #app > div:nth-child(4) > div:last-child {
+  .detail-panel {
     height: 92vh !important;
     padding: 24px 20px !important;
     gap: 20px !important;
@@ -2360,10 +2435,10 @@ button {
     align-items: center !important;
   }
   /* Cover smaller on mobile */
-  #app > div:nth-child(4) > div:last-child > div:first-child {
+  .detail-panel-cover {
     flex: 0 0 auto !important;
   }
-  #app > div:nth-child(4) > div:last-child > div:first-child img {
+  .detail-panel-cover img {
     max-width: 180px !important;
     max-height: 250px !important;
     box-shadow: 10px 10px 20px rgba(0,0,0,0.4) !important;
