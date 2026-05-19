@@ -2412,6 +2412,38 @@ button {
   background: var(--bg-raised);
 }
 
+/* Page Turn Indicator Zones */
+.turn-indicator-zone {
+  position: absolute;
+  top: 80px;
+  bottom: 60px;
+  width: 60px;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.3s ease;
+  opacity: 0;
+}
+.turn-indicator-zone:hover {
+  opacity: 1;
+}
+.turn-indicator-zone.turn-left {
+  background: linear-gradient(to right, rgba(255,255,255,0.04), transparent);
+}
+.turn-indicator-zone.turn-right {
+  background: linear-gradient(to left, rgba(255,255,255,0.04), transparent);
+}
+.turn-indicator-zone:hover .turn-indicator-icon {
+  opacity: 0.3 !important;
+  transition: opacity 0.3s ease;
+}
+
+@media (max-width: 768px) {
+  .turn-indicator-zone { display: none; }
+}
+
 /* ======================== */
 /* MOBILE OPTIMIZATIONS     */
 /* ======================== */

@@ -144,8 +144,17 @@ const NativeReader = ({ book, onClose, user }) => {
   const [currentSearchIndex, setCurrentSearchIndex] = useState(-1);
 
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [ttsRate, setTtsRate] = useState(1.0);
+  const [ttsVoice, setTtsVoice] = useState(null);
+  const [availableVoices, setAvailableVoices] = useState([]);
+  const [showTtsPanel, setShowTtsPanel] = useState(false);
   const [sessionTime, setSessionTime] = useState(0);
   const [showTopBar, setShowTopBar] = useState(false);
+
+  // Sidebar annotations
+  const [sidebarTab, setSidebarTab] = useState('toc'); // 'toc' | 'highlights' | 'bookmarks'
+  const [showShortcutsModal, setShowShortcutsModal] = useState(false);
 
   const sessionStartTime = useRef(Date.now());
   const touchStartX = useRef(0);
@@ -167,6 +176,40 @@ const NativeReader = ({ book, onClose, user }) => {
   useEffect(() => {
     saveReaderPrefs({ fontSize, fontFamily, lineHeight, marginSize, theme, spread });
   }, [fontSize, fontFamily, lineHeight, marginSize, theme, spread]);
+
+  // Load available TTS voices
+  useEffect(() => {
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    const loadVoices = () => {
+      const voices = synth.getVoices();
+      setAvailableVoices(voices);
+      // Auto-select a Hindi voice if book is Hindi
+      const bookLang = (book.languages?.[0] || '').toLowerCase();
+      if (bookLang.match(/^(hi|hin|hindi)$/)) {
+        const hindiVoice = voices.find(v => v.lang.startsWith('hi'));
+        if (hindiVoice) setTtsVoice(hindiVoice);
+      }
+    };
+    loadVoices();
+    synth.addEventListener('voiceschanged', loadVoices);
+    return () => synth.removeEventListener('voiceschanged', loadVoices);
+  }, []);
+
+  // Keyboard shortcuts for reader
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
+      if (e.key === ' ' && !e.shiftKey) { e.preventDefault(); handleTTS(); }
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) { e.preventDefault(); setShowShortcutsModal(v => !v); }
+      if (e.key === 'Escape') { setShowShortcutsModal(false); setShowTtsPanel(false); }
+      if (e.key === 'f' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setShowSearch(v => !v); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [page, totalPages, isSpeaking]);
 
   // Fetch initial data
   useEffect(() => {
@@ -1112,29 +1155,59 @@ const NativeReader = ({ book, onClose, user }) => {
     const text = getVisibleText();
     if (!text) {
       setIsSpeaking(false);
+      setIsPaused(false);
       return;
     }
     
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.0;
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
+    utterance.rate = ttsRate;
+    if (ttsVoice) utterance.voice = ttsVoice;
+    utterance.onend = () => { setIsSpeaking(false); setIsPaused(false); };
+    utterance.onerror = () => { setIsSpeaking(false); setIsPaused(false); };
     
     synth.speak(utterance);
     setIsSpeaking(true);
+    setIsPaused(false);
   };
 
   const handleTTS = () => {
     const synth = window.speechSynthesis;
     if (!synth) return;
     
-    if (isSpeaking) {
-      synth.cancel();
-      setIsSpeaking(false);
+    if (isSpeaking && !isPaused) {
+      synth.pause();
+      setIsPaused(true);
+      return;
+    }
+    if (isPaused) {
+      synth.resume();
+      setIsPaused(false);
       return;
     }
     
     readCurrentPage();
+  };
+
+  const stopTTS = () => {
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    synth.cancel();
+    setIsSpeaking(false);
+    setIsPaused(false);
+  };
+
+  // Delete a highlight
+  const deleteHighlight = (idx) => {
+    const newHighlights = highlights.filter((_, i) => i !== idx);
+    setHighlights(newHighlights);
+    saveData(undefined, newHighlights, undefined);
+  };
+
+  // Delete a bookmark
+  const deleteBookmark = (idx) => {
+    const newBookmarks = bookmarks.filter((_, i) => i !== idx);
+    setBookmarks(newBookmarks);
+    saveData(undefined, undefined, newBookmarks);
   };
 
   useEffect(() => {
@@ -1281,7 +1354,7 @@ const NativeReader = ({ book, onClose, user }) => {
       <div 
         className="reader-topbar"
         onMouseEnter={() => setShowTopBar(true)}
-        onMouseLeave={() => { setShowTopBar(false); setShowSettings(false); setShowToc(false); setShowSearch(false); }}
+        onMouseLeave={() => { setShowTopBar(false); setShowSettings(false); setShowToc(false); setShowTtsPanel(false); if (showSearch) { setShowSearch(false); clearSearch(); } }}
       >
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
           <button onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
@@ -1293,17 +1366,30 @@ const NativeReader = ({ book, onClose, user }) => {
               <button onClick={() => setShowToc(!showToc)} style={{ color: showToc ? 'var(--ember)' : 'var(--text-secondary)' }}>
                 <List size={16} />
               </button>
-              <button onClick={() => setShowSearch(!showSearch)} style={{ color: showSearch ? 'var(--ember)' : 'var(--text-secondary)' }}>
+              <button onClick={() => { 
+                const newState = !showSearch; 
+                setShowSearch(newState); 
+                if (!newState) clearSearch(); 
+              }} style={{ color: showSearch ? 'var(--ember)' : 'var(--text-secondary)' }}>
                 <Search size={16} />
               </button>
             </>
           )}
         </div>
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-          {/* TTS Button */}
-          <button onClick={handleTTS} style={{ color: isSpeaking ? currentTheme.accent : 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <Volume2 size={16} />
-            {isSpeaking && <span className="mono" style={{ fontSize: '9px' }}>STOP</span>}
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+          {/* TTS Controls */}
+          <button onClick={handleTTS} style={{ color: isSpeaking ? currentTheme.accent : 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }} title={isSpeaking ? (isPaused ? 'Resume' : 'Pause') : 'Read aloud'}>
+            {isSpeaking ? (isPaused ? <Play size={16} /> : <SquareIcon size={14} />) : <Volume2 size={16} />}
+            {isSpeaking && <span className="mono" style={{ fontSize: '9px' }}>{isPaused ? 'RESUME' : 'PAUSE'}</span>}
+          </button>
+          {isSpeaking && (
+            <button onClick={stopTTS} style={{ color: 'var(--text-secondary)', display: 'flex', alignItems: 'center' }} title="Stop">
+              <X size={14} />
+            </button>
+          )}
+          <button onClick={() => setShowTtsPanel(v => !v)} style={{ color: showTtsPanel ? currentTheme.accent : 'var(--text-secondary)' }} title="TTS settings">
+            <Volume2 size={14} style={{ opacity: 0.6 }} />
+            <span className="mono" style={{ fontSize: '8px', marginLeft: '2px' }}>{ttsRate}×</span>
           </button>
           {!isMobile && (
             <>
@@ -1314,7 +1400,7 @@ const NativeReader = ({ book, onClose, user }) => {
               </span>
             </>
           )}
-          <button onClick={() => { setShowSettings(!showSettings); setShowSearch(false); setShowToc(false); }} style={{ color: showSettings ? currentTheme.accent : 'var(--text-secondary)' }}>
+          <button onClick={() => { setShowSettings(!showSettings); setShowSearch(false); setShowToc(false); setShowTtsPanel(false); }} style={{ color: showSettings ? currentTheme.accent : 'var(--text-secondary)' }}>
             <Settings size={16} />
           </button>
         </div>
@@ -1509,9 +1595,56 @@ const NativeReader = ({ book, onClose, user }) => {
         </div>
       )}
 
-      {/* TOC SIDEBAR */}
+      {/* TTS SETTINGS PANEL */}
+      {showTtsPanel && (
+        <div className="reader-settings" style={{ background: currentTheme.bg, top: '60px', right: '280px', display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px', minWidth: '220px' }}>
+          <div className="mono" style={{ fontSize: '10px', letterSpacing: '0.1em', opacity: 0.6, marginBottom: '4px' }}>SPEECH SETTINGS</div>
+          
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <span className="mono" style={{ fontSize: '10px', opacity: 0.6, minWidth: '40px' }}>RATE</span>
+            <input 
+              type="range" 
+              min="0.5" max="2.5" step="0.1" 
+              value={ttsRate}
+              onChange={e => setTtsRate(parseFloat(e.target.value))}
+              style={{ flex: 1, accentColor: currentTheme.accent }}
+            />
+            <span className="mono" style={{ fontSize: '11px', minWidth: '30px' }}>{ttsRate}×</span>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <span className="mono" style={{ fontSize: '10px', opacity: 0.6 }}>VOICE</span>
+            <select 
+              value={ttsVoice?.name || ''}
+              onChange={e => {
+                const v = availableVoices.find(v => v.name === e.target.value);
+                setTtsVoice(v || null);
+              }}
+              style={{
+                background: 'transparent',
+                border: `1px solid ${currentTheme.muted}`,
+                color: currentTheme.color,
+                padding: '6px 8px',
+                borderRadius: '4px',
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: '10px',
+                outline: 'none',
+                cursor: 'pointer',
+                maxWidth: '200px'
+              }}
+            >
+              <option value="">Default</option>
+              {availableVoices.map(v => (
+                <option key={v.name} value={v.name}>{v.name} ({v.lang})</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
+
+      {/* SIDEBAR — Tabbed (TOC / Highlights / Bookmarks) */}
       <div style={{
-        position: 'absolute', top: '60px', left: 0, bottom: 0, width: '300px',
+        position: 'absolute', top: '60px', left: 0, bottom: 0, width: '320px',
         background: currentTheme.bg, zIndex: 1000,
         borderRight: `1px solid ${currentTheme.muted}`,
         transform: showToc ? 'translateX(0)' : 'translateX(-100%)',
@@ -1519,36 +1652,174 @@ const NativeReader = ({ book, onClose, user }) => {
         display: 'flex', flexDirection: 'column',
         boxShadow: showToc ? '20px 0 40px rgba(0,0,0,0.5)' : 'none'
       }}>
-        <div className="mono" style={{ padding: '24px', fontSize: '12px', letterSpacing: '0.1em', borderBottom: `1px solid ${currentTheme.muted}` }}>
-          TABLE OF CONTENTS
+        {/* Sidebar tabs */}
+        <div style={{ display: 'flex', borderBottom: `1px solid ${currentTheme.muted}` }}>
+          {[
+            { key: 'toc', label: 'CONTENTS' },
+            { key: 'highlights', label: `HIGHLIGHTS (${highlights.length})` },
+            { key: 'bookmarks', label: `MARKS (${bookmarks.length})` }
+          ].map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => setSidebarTab(tab.key)}
+              className="mono"
+              style={{
+                flex: 1,
+                padding: '14px 8px',
+                fontSize: '9px',
+                letterSpacing: '0.08em',
+                borderBottom: sidebarTab === tab.key ? `2px solid ${currentTheme.accent}` : '2px solid transparent',
+                color: sidebarTab === tab.key ? currentTheme.accent : currentTheme.color,
+                opacity: sidebarTab === tab.key ? 1 : 0.5,
+                transition: 'all 0.2s'
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
-        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 0' }}>
-          {tocItems.length === 0 ? (
-            <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO HEADINGS FOUND</div>
-          ) : (
-            tocItems.map((item, idx) => (
-              <div 
-                key={idx} 
-                onClick={() => navigateToTocItem(item)}
-                style={{ 
-                  padding: `12px 24px 12px ${24 + (item.level - 1) * 16}px`,
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                  fontFamily: "'Libre Baskerville', serif",
-                  lineHeight: 1.4,
-                  opacity: 0.8,
-                  transition: 'background 0.2s, opacity 0.2s',
-                  borderBottom: `1px solid ${currentTheme.muted}30`
-                }}
-                onMouseEnter={e => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = currentTheme.muted; }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = 0.8; e.currentTarget.style.background = 'transparent'; }}
-              >
-                {item.title}
-              </div>
-            ))
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+          {/* TOC Tab */}
+          {sidebarTab === 'toc' && (
+            tocItems.length === 0 ? (
+              <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO HEADINGS FOUND</div>
+            ) : (
+              tocItems.map((item, idx) => (
+                <div 
+                  key={idx} 
+                  onClick={() => navigateToTocItem(item)}
+                  style={{ 
+                    padding: `12px 24px 12px ${24 + (item.level - 1) * 16}px`,
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontFamily: "'Libre Baskerville', serif",
+                    lineHeight: 1.4,
+                    opacity: 0.8,
+                    transition: 'background 0.2s, opacity 0.2s',
+                    borderBottom: `1px solid ${currentTheme.muted}30`
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = currentTheme.muted; }}
+                  onMouseLeave={e => { e.currentTarget.style.opacity = 0.8; e.currentTarget.style.background = 'transparent'; }}
+                >
+                  {item.title}
+                </div>
+              ))
+            )
+          )}
+
+          {/* Highlights Tab */}
+          {sidebarTab === 'highlights' && (
+            highlights.length === 0 ? (
+              <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO HIGHLIGHTS YET<br/><span style={{ opacity: 0.6, fontSize: '9px' }}>Select text and tap HIGHLIGHT to add one.</span></div>
+            ) : (
+              highlights.map((hl, idx) => (
+                <div 
+                  key={idx}
+                  style={{
+                    padding: '14px 20px',
+                    borderBottom: `1px solid ${currentTheme.muted}30`,
+                    display: 'flex', alignItems: 'flex-start', gap: '12px',
+                    cursor: 'pointer',
+                    transition: 'background 0.2s'
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = currentTheme.muted}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                >
+                  <div style={{ width: '3px', minHeight: '24px', background: 'var(--gold)', borderRadius: '2px', flexShrink: 0, marginTop: '2px' }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '13px', fontFamily: "'Libre Baskerville', serif", lineHeight: 1.5, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' }}>
+                      "{hl.text}"
+                    </div>
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); deleteHighlight(idx); }} style={{ opacity: 0.4, flexShrink: 0 }} title="Delete highlight">
+                    <X size={12} />
+                  </button>
+                </div>
+              ))
+            )
+          )}
+
+          {/* Bookmarks Tab */}
+          {sidebarTab === 'bookmarks' && (
+            bookmarks.length === 0 ? (
+              <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO BOOKMARKS YET<br/><span style={{ opacity: 0.6, fontSize: '9px' }}>Select text and tap BOOKMARK to add one.</span></div>
+            ) : (
+              bookmarks.map((bm, idx) => (
+                <div 
+                  key={idx}
+                  onClick={() => { setPage(bm.page); saveData(bm.page, undefined, undefined); setShowToc(false); }}
+                  style={{
+                    padding: '14px 20px',
+                    borderBottom: `1px solid ${currentTheme.muted}30`,
+                    display: 'flex', alignItems: 'center', gap: '12px',
+                    cursor: 'pointer',
+                    transition: 'background 0.2s'
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = currentTheme.muted}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                >
+                  <BookmarkPlus size={14} style={{ opacity: 0.5, flexShrink: 0, color: currentTheme.accent }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '12px', fontFamily: "'Libre Baskerville', serif", lineHeight: 1.5 }}>
+                      {bm.excerpt}
+                    </div>
+                    <div className="mono" style={{ fontSize: '9px', opacity: 0.4, marginTop: '4px' }}>
+                      PAGE {bm.page + 1} · {new Date(bm.time).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); deleteBookmark(idx); }} style={{ opacity: 0.4, flexShrink: 0 }} title="Delete bookmark">
+                    <X size={12} />
+                  </button>
+                </div>
+              ))
+            )
           )}
         </div>
       </div>
+
+      {/* KEYBOARD SHORTCUTS MODAL */}
+      {showShortcutsModal && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 2000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)'
+        }} onClick={() => setShowShortcutsModal(false)}>
+          <div style={{
+            background: currentTheme.bg,
+            border: `1px solid ${currentTheme.muted}`,
+            borderRadius: '12px',
+            padding: '32px',
+            maxWidth: '400px',
+            width: '90vw',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.4)'
+          }} onClick={e => e.stopPropagation()}>
+            <div className="mono" style={{ fontSize: '12px', letterSpacing: '0.1em', marginBottom: '24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              KEYBOARD SHORTCUTS
+              <button onClick={() => setShowShortcutsModal(false)} style={{ opacity: 0.5 }}><X size={16} /></button>
+            </div>
+            {[
+              ['← →', 'Navigate pages'],
+              ['Space', 'Play / Pause speech'],
+              ['Ctrl+F', 'Search in book'],
+              ['?', 'Toggle this help'],
+              ['Esc', 'Close panels']
+            ].map(([key, desc]) => (
+              <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: `1px solid ${currentTheme.muted}30` }}>
+                <span style={{ fontSize: '13px', opacity: 0.8 }}>{desc}</span>
+                <kbd style={{
+                  background: currentTheme.muted,
+                  padding: '4px 10px',
+                  borderRadius: '4px',
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: '11px',
+                  border: `1px solid ${currentTheme.muted}`
+                }}>{key}</kbd>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* SELECTION MENU */}
       {selectionMenu && (
@@ -1587,12 +1858,6 @@ const NativeReader = ({ book, onClose, user }) => {
             {currentChapterTitle || book.title}
           </div>
         )}
-
-        {/* Left arrow */}
-        <button className="nav-arrow" onClick={(e) => { e.stopPropagation(); prev(); }} style={{ left: '1vw' }}
-          onMouseEnter={e=>e.currentTarget.style.opacity=0.3} onMouseLeave={e=>e.currentTarget.style.opacity=0}>
-          <ArrowLeft size={28} />
-        </button>
 
         {/* BOOK CONTENT — CSS multi-column layout */}
         <div style={{
@@ -1829,11 +2094,23 @@ const NativeReader = ({ book, onClose, user }) => {
           )}
         </div>
 
-        {/* Right arrow */}
-        <button className="nav-arrow" onClick={(e) => { e.stopPropagation(); next(); }} style={{ right: '1vw' }}
-          onMouseEnter={e=>e.currentTarget.style.opacity=0.3} onMouseLeave={e=>e.currentTarget.style.opacity=0}>
-          <ArrowRight size={28} />
-        </button>
+        {/* Left turn zone */}
+        <div 
+          className="turn-indicator-zone turn-left" 
+          onClick={(e) => { e.stopPropagation(); prev(); }}
+          style={{ left: 0 }}
+        >
+          <ArrowLeft size={20} style={{ opacity: 0 }} className="turn-indicator-icon" />
+        </div>
+
+        {/* Right turn zone */}
+        <div 
+          className="turn-indicator-zone turn-right" 
+          onClick={(e) => { e.stopPropagation(); next(); }}
+          style={{ right: 0 }}
+        >
+          <ArrowRight size={20} style={{ opacity: 0 }} className="turn-indicator-icon" />
+        </div>
 
         {/* Page numbers */}
         {spread ? (
