@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Noto+Sans+Devanagari:wght@400;500;700&family=Playfair+Display:ital,wght@0,400..900;1,400..900&display=swap');
+
 :root {
   /* Backgrounds */
   --bg-void:      #06060A;
@@ -1584,68 +1586,147 @@ button {
   transform-style: preserve-3d;
 }
 
-.page-slider.turning-next {
-  animation: bookPageNext 0.55s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+/* 3D Flipping Layout Overlay */
+.book-flip-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 950;
+  display: flex;
+  perspective: 3000px;
+  background: inherit;
+  overflow: hidden;
+  pointer-events: none;
 }
 
-.page-slider.turning-prev {
-  animation: bookPagePrev 0.55s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+.book-page {
+  width: 50%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  background: inherit;
 }
 
-@keyframes bookPageNext {
-  0% {
-    filter: brightness(1) drop-shadow(0 0 0 transparent);
-  }
-  20% {
-    filter: brightness(0.82) drop-shadow(-10px 0 20px rgba(0,0,0,0.3));
-  }
-  60% {
-    filter: brightness(0.93) drop-shadow(-4px 0 8px rgba(0,0,0,0.15));
-  }
-  100% {
-    filter: brightness(1) drop-shadow(0 0 0 transparent);
-  }
+.book-page.single {
+  width: 100%;
 }
 
-@keyframes bookPagePrev {
-  0% {
-    filter: brightness(1) drop-shadow(0 0 0 transparent);
-  }
-  20% {
-    filter: brightness(0.82) drop-shadow(10px 0 20px rgba(0,0,0,0.3));
-  }
-  60% {
-    filter: brightness(0.93) drop-shadow(4px 0 8px rgba(0,0,0,0.15));
-  }
-  100% {
-    filter: brightness(1) drop-shadow(0 0 0 transparent);
-  }
+.book-page-content {
+  width: 100vw;
+  height: calc(100vh - 140px);
+  margin-top: 70px;
+  position: absolute;
+  column-fill: auto;
+  overflow: hidden;
 }
 
-/* Page turn shadow overlay */
-.page-slider.turning-next::after,
-.page-slider.turning-prev::after {
+.flipping-page-wrapper {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 50%;
+  z-index: 960;
+  transform-style: preserve-3d;
+  transform-origin: left center;
+  background: transparent;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.flipping-page-wrapper.single {
+  left: 0;
+  width: 100%;
+}
+
+.flipping-page-flipper {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  width: 100%;
+  height: 100%;
+}
+
+.flipping-page-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  overflow: hidden;
+  background: inherit;
+  transform-style: preserve-3d;
+}
+
+.flipping-page-face.face-front {
+  z-index: 2;
+  transform: rotateY(0deg);
+}
+
+.flipping-page-face.face-back {
+  transform: rotateY(180deg);
+}
+
+/* 3D shading/gradient overlays for realism */
+.flipping-page-face::after {
   content: '';
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 50;
-  animation: pageShadow 0.55s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+  z-index: 10;
 }
 
-.page-slider.turning-next::after {
-  background: linear-gradient(to left, rgba(0,0,0,0.08) 0%, transparent 30%);
+.face-front::after {
+  background: linear-gradient(to right, rgba(0,0,0,0.12) 0%, transparent 20%, rgba(0,0,0,0.04) 100%);
 }
 
-.page-slider.turning-prev::after {
-  background: linear-gradient(to right, rgba(0,0,0,0.08) 0%, transparent 30%);
+.face-back::after {
+  background: linear-gradient(to left, rgba(0,0,0,0.12) 0%, transparent 20%, rgba(0,0,0,0.04) 100%);
 }
 
-@keyframes pageShadow {
-  0% { opacity: 0; }
-  20% { opacity: 1; }
-  100% { opacity: 0; }
+/* Middle Spine divider line */
+.spread-spine {
+  position: absolute;
+  top: 70px;
+  bottom: 70px;
+  left: 50%;
+  width: 16px;
+  background: linear-gradient(to right, 
+    rgba(0,0,0,0.2) 0%, 
+    rgba(0,0,0,0.03) 25%, 
+    transparent 50%, 
+    rgba(0,0,0,0.03) 75%, 
+    rgba(0,0,0,0.2) 100%
+  );
+  z-index: 970;
+  transform: translateX(-50%);
+  pointer-events: none;
 }
+
+@keyframes flipNextSpread {
+  0% {
+    transform: rotateY(0deg);
+  }
+  100% {
+    transform: rotateY(-180deg);
+  }
+}
+
+@keyframes flipPrevSpread {
+  0% {
+    transform: rotateY(-180deg);
+  }
+  100% {
+    transform: rotateY(0deg);
+  }
+}
+
+.flipping-page-wrapper.flip-next {
+  animation: flipNextSpread 0.55s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
+.flipping-page-wrapper.flip-prev {
+  animation: flipPrevSpread 0.55s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
 
 .reader-content h1,
 .reader-content h2,
@@ -1791,6 +1872,13 @@ button {
   padding: 0.5em;
   border-bottom: 1px solid rgba(128,128,128,0.2);
   text-align: left;
+}
+
+.reader-content .chapter-break,
+.reader-content h2,
+.reader-content .chapter-heading {
+  break-before: column;
+  -webkit-column-break-before: always;
 }
 
 .reader-content .chapter-break {
@@ -2363,7 +2451,7 @@ button {
     min-height: 100vh;
     padding: 60px 0 40px !important;
   }
-  #hero > div:nth-child(3) {
+  #hero .hero-inner {
     padding-left: 6vw !important;
     padding-right: 6vw !important;
   }
@@ -2385,7 +2473,7 @@ button {
     font-size: 8px;
   }
   /* Hide SCROLL indicator on mobile */
-  #hero > div:nth-child(3) > div:last-child { display: none !important; }
+  #hero .hero-inner > div:last-child { display: none !important; }
   
   /* ---- CATALOG SECTION ---- */
   #main-view {
@@ -2400,8 +2488,7 @@ button {
   }
   
   /* ---- BOOK CARD GRID ---- */
-  #main-view > div:nth-child(3),
-  #main-view > div:nth-child(4) {
+  .book-cards-grid {
     grid-template-columns: repeat(2, 1fr) !important;
     gap: 12px !important;
   }
@@ -2444,20 +2531,20 @@ button {
     box-shadow: 10px 10px 20px rgba(0,0,0,0.4) !important;
   }
   /* Info section */
-  #app > div:nth-child(4) > div:last-child > div:nth-child(3) {
+  .detail-panel-overlay .detail-info-col {
     align-items: center !important;
     text-align: center !important;
     padding-bottom: 20px !important;
   }
-  #app > div:nth-child(4) > div:last-child > div:nth-child(3) h2 {
+  .detail-panel-overlay .detail-info-col h2 {
     font-size: 1.5rem !important;
   }
-  #app > div:nth-child(4) > div:last-child > div:nth-child(3) .detail-tag {
+  .detail-panel-overlay .detail-info-col .detail-tag {
     font-size: 8px !important;
     padding: 4px 8px !important;
   }
   /* Close button bigger touch target */
-  #app > div:nth-child(4) > div:last-child > button:first-child {
+  .detail-panel-overlay .detail-close-btn {
     font-size: 28px !important;
     padding: 8px !important;
     top: 12px !important;

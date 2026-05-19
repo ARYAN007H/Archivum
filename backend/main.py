@@ -14,8 +14,8 @@ app.add_middleware(
 
 def parse_gutenberg_text(text: str):
     # Strip start/end headers
-    start_match = re.search(r'\*\*\* START OF THE PROJECT GUTENBERG EBOOK.*?\*\*\*', text)
-    end_match = re.search(r'\*\*\* END OF THE PROJECT GUTENBERG EBOOK.*?\*\*\*', text)
+    start_match = re.search(r'\*\*\*\s*START OF (THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*', text, re.IGNORECASE)
+    end_match = re.search(r'\*\*\*\s*END OF (THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*', text, re.IGNORECASE)
     
     if start_match:
         text = text[start_match.end():]
@@ -36,11 +36,16 @@ def parse_gutenberg_text(text: str):
             continue
             
         # Try to detect if block is a chapter heading
-        # A heading is usually short and often uppercase or starts with Chapter
+        # A heading is usually short and often uppercase or starts with Chapter, Book, or Hindi equivalent
         is_heading = False
-        lines = block.split('\n')
-        if len(lines) <= 2 and len(block) < 100:
-            if block.isupper() or block.lower().startswith('chapter') or block.lower().startswith('book') or block.lower().startswith('part'):
+        lines = [l.strip() for l in block.split('\n') if l.strip()]
+        if len(lines) <= 2 and len(block) < 120:
+            first_line = lines[0]
+            if (
+                block.isupper() or 
+                re.match(r'^(chapter|book|part|section|volume|story|act|scene|prologue|epilogue|अध्याय)\b', first_line, re.IGNORECASE) or
+                re.match(r'^[IVXLCDM]+\b', first_line)
+            ):
                 is_heading = True
                 
         if is_heading:
@@ -52,6 +57,11 @@ def parse_gutenberg_text(text: str):
             para = re.sub(r'(?<!\n)\n(?!\n)', ' ', block)
             # Fix any multiple spaces
             para = re.sub(r'\s+', ' ', para).strip()
+            
+            # Format markdown italics/bolds to HTML
+            para = re.sub(r'_([^_]+)_', r'<em>\1</em>', para)
+            para = re.sub(r'\*([^*]+)\*', r'<strong>\1</strong>', para)
+            
             current_chapter["paragraphs"].append(para)
             
     if current_chapter["paragraphs"]:

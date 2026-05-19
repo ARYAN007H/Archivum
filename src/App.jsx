@@ -425,6 +425,7 @@ function App() {
 
   const loaderRef = useRef(null);
   const cursorRef = useRef(null);
+  const scrollPositionRef = useRef(0);
   const currentFetchId = useRef(0);
 
   // Search Overlay (Cmd+K)
@@ -432,13 +433,17 @@ function App() {
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [overlayQuery, setOverlayQuery] = useState('');
 
   // Trending books for hero
   const [trendingBooks, setTrendingBooks] = useState([]);
 
   // Reading progress map { bookId: pageNum }
   const [progressMap, setProgressMap] = useState({});
+  const [dailyGoal, setDailyGoal] = useState(() => {
+    try { return parseInt(localStorage.getItem('archivum_daily_goal') || '30', 10); } catch { return 30; }
+  });
+  const [offlineBookIds, setOfflineBookIds] = useState(new Set());
 
   // Book-open cinematic transition
   const [bookOpenAnim, setBookOpenAnim] = useState(null);
@@ -565,6 +570,12 @@ function App() {
   };
 
   useEffect(() => {
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    if (isTouchDevice) {
+      if (cursorRef.current) cursorRef.current.style.display = 'none';
+      return;
+    }
+
     const handleMouseMove = (e) => {
       if (cursorRef.current) {
         cursorRef.current.style.transform = `translate3d(${e.clientX}px, ${e.clientY}px, 0) translate(-50%, -50%)`;
@@ -843,6 +854,8 @@ function App() {
   }, [searchLangFilter]);
 
   const openBook = (book) => {
+    scrollPositionRef.current = window.scrollY;
+    window.__lenis?.stop();
     setSelectedBook(book);
     document.body.style.overflow = 'hidden';
     document.body.classList.remove('cursor-read');
@@ -854,6 +867,9 @@ function App() {
     setTimeout(() => {
       setSelectedBook(null);
       document.body.style.overflow = 'auto';
+      window.__lenis?.start();
+      window.scrollTo(0, scrollPositionRef.current);
+      window.__lenis?.scrollTo(scrollPositionRef.current, { immediate: true });
     }, 400);
   };
 
@@ -982,7 +998,7 @@ function App() {
           <motion.div style={{ position: 'absolute', inset: 0, zIndex: 2, pointerEvents: 'none' }}>
             <div className="mono" style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%) rotate(-90deg)', color: 'var(--text-secondary)', transformOrigin: 'left center' }}>GUTENBERG + INTERNET ARCHIVE</div>
           </motion.div>
-          <div style={{ position: 'relative', zIndex: 3, width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <div className="hero-inner" style={{ position: 'relative', zIndex: 3, width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
             <span className="mono" style={{ color: 'var(--ember)', marginBottom: '20px' }}>// THE FREE LIBRARY</span>
             <motion.h1 
               className="hero-title"
@@ -1047,7 +1063,7 @@ function App() {
             const ds = d.toDateString();
             heatmapData.push({ date: ds, active: uniqueDays.has(ds) });
           }
-          const goalMinutes = 30;
+          const goalMinutes = dailyGoal;
           const todayMinutes = Math.min(goalMinutes, stats.totalMinutes > 0 ? Math.min(goalMinutes, 15) : 0); // approximate
           const goalPercent = (todayMinutes / goalMinutes) * 100;
           const goalR = 50, goalC = 2 * Math.PI * goalR;
@@ -1091,7 +1107,7 @@ function App() {
               </div>
 
               {/* Reading Goal */}
-              <div style={{ display: 'flex', gap: '32px', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px', marginTop: '24px' }}>
                 <div className="goal-ring-container">
                   <svg className="goal-ring" viewBox="0 0 120 120">
                     <circle className="ring-bg" cx="60" cy="60" r={goalR} />
@@ -1100,7 +1116,33 @@ function App() {
                     <text className="ring-text" x="60" y="55">{Math.round(goalPercent)}%</text>
                     <text x="60" y="72" textAnchor="middle" style={{ fontSize: '8px', fill: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>DAILY GOAL</text>
                   </svg>
-                  <span className="mono" style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>30 MIN / DAY</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <span className="mono" style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>DAILY TARGET:</span>
+                  <select 
+                    value={dailyGoal}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      setDailyGoal(val);
+                      localStorage.setItem('archivum_daily_goal', val);
+                      addToast(`Daily target set to ${val} minutes.`);
+                    }}
+                    style={{
+                      background: 'var(--bg-raised)',
+                      border: '1px solid var(--border)',
+                      color: 'var(--text-primary)',
+                      padding: '4px 8px',
+                      borderRadius: '4px',
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: '11px',
+                      outline: 'none',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    {[15, 30, 45, 60, 90, 120].map(mins => (
+                      <option key={mins} value={mins}>{mins} MINS</option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </div>
@@ -1130,7 +1172,7 @@ function App() {
           </div>
         )}
         
-        <div style={{
+        <div className="book-cards-grid" style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '24px'
         }}>
           {/* Skeleton cards during loading */}
@@ -1217,7 +1259,7 @@ function App() {
       </section>
 
       {/* BOOK DETAIL PANEL */}
-      <div style={{
+      <div className="detail-panel-overlay" style={{
         position: 'fixed', inset: 0, zIndex: 500, pointerEvents: selectedBook ? 'auto' : 'none',
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end'
       }}>
@@ -1228,7 +1270,7 @@ function App() {
             opacity: selectedBook ? 1 : 0, transition: 'opacity 0.5s' 
           }} 
         />
-        <div style={{
+        <div className="detail-panel-container" style={{
           position: 'relative', background: 'var(--bg-overlay)', borderTop: '1px solid var(--border)',
           height: '70vh', transform: selectedBook ? 'translateY(0)' : 'translateY(100%)', 
           transition: 'transform 0.45s cubic-bezier(0.32, 0, 0, 1)',
@@ -1236,7 +1278,7 @@ function App() {
         }}>
           {selectedBook && (
             <div className="detail-panel" style={{ opacity: detailAnim ? 1 : 0, transform: detailAnim ? 'translateY(0)' : 'translateY(20px)', transition: 'opacity 0.4s ease, transform 0.4s ease' }}>
-              <button onClick={closeBook} style={{ position: 'absolute', top: '24px', right: '24px', fontSize: '32px', color: 'var(--text-secondary)' }} aria-label="Close details">&times;</button>
+              <button onClick={closeBook} className="detail-close-btn" style={{ position: 'absolute', top: '24px', right: '24px', fontSize: '32px', color: 'var(--text-secondary)' }} aria-label="Close details">&times;</button>
               
               <div style={{ flex: '0 0 300px', display: 'flex', flexDirection: 'column', gap: '24px', alignItems: 'center' }}>
                 <DynamicCover 
@@ -1245,7 +1287,7 @@ function App() {
                 />
               </div>
 
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', overflowY: 'auto', paddingBottom: '40px' }}>
+              <div className="detail-info-col" style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', overflowY: 'auto', paddingBottom: '40px' }}>
                 <div className="mono text-secondary" style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
                   <span>WORK № {selectedBook.id.toString().padStart(5, '0')}</span>
                   <span className="lang-badge">{(selectedBook.languages?.[0] || 'en').toUpperCase()}</span>
@@ -1325,15 +1367,22 @@ function App() {
                 autoFocus
                 type="text"
                 placeholder="Search books in English, Hindi..."
-                value={query}
-                onChange={e => { setQuery(e.target.value); handleOverlaySearch(e.target.value); }}
+                value={overlayQuery}
+                onChange={e => { setOverlayQuery(e.target.value); handleOverlaySearch(e.target.value); }}
                 onKeyDown={e => {
                   if (e.key === 'Escape') setShowSearchOverlay(false);
                   if (e.key === 'ArrowDown') setActiveSearchIndex(i => Math.min(i + 1, searchResults.length - 1));
                   if (e.key === 'ArrowUp') setActiveSearchIndex(i => Math.max(i - 1, 0));
-                  if (e.key === 'Enter' && searchResults[activeSearchIndex]) {
-                    openBook(searchResults[activeSearchIndex]);
-                    setShowSearchOverlay(false);
+                  if (e.key === 'Enter') {
+                    if (searchResults[activeSearchIndex]) {
+                      openBook(searchResults[activeSearchIndex]);
+                      setShowSearchOverlay(false);
+                    } else {
+                      setQuery(overlayQuery);
+                      setView('catalog');
+                      setShowSearchOverlay(false);
+                      window.__lenis?.scrollTo(window.innerHeight, { immediate: false }) || window.scrollTo({ top: window.innerHeight, behavior: 'smooth' });
+                    }
                   }
                 }}
               />
@@ -1345,7 +1394,7 @@ function App() {
                 <button
                   key={l.key}
                   className={`search-lang-tab ${searchLangFilter === l.key ? 'active' : ''}`}
-                  onClick={() => { setSearchLangFilter(l.key); handleOverlaySearch(query, l.key); }}
+                  onClick={() => { setSearchLangFilter(l.key); handleOverlaySearch(overlayQuery, l.key); }}
                 >
                   {l.label}
                 </button>
@@ -1353,7 +1402,7 @@ function App() {
             </div>
             <div className="search-overlay-results">
               {/* Local suggestion chips (instant) */}
-              {localSuggestions.length > 0 && query && (
+              {localSuggestions.length > 0 && overlayQuery && (
                 <div className="search-suggestions">
                   <span className="mono" style={{ fontSize: '9px', color: 'var(--text-muted)', padding: '0 24px' }}>SUGGESTIONS</span>
                   <div className="suggestion-chips">
@@ -1361,7 +1410,7 @@ function App() {
                       <button
                         key={i}
                         className="suggestion-chip"
-                        onClick={() => { setQuery(s.title); handleOverlaySearch(s.title); }}
+                        onClick={() => { setOverlayQuery(s.title); handleOverlaySearch(s.title); }}
                       >
                         {s.title}{s.author ? ` — ${s.author}` : ''}
                       </button>
@@ -1370,9 +1419,9 @@ function App() {
                 </div>
               )}
               {searchLoading && <div className="search-overlay-empty"><div className="mono text-secondary">SEARCHING...</div></div>}
-              {!searchLoading && searchResults.length === 0 && query && localSuggestions.length === 0 && (
+              {!searchLoading && searchResults.length === 0 && overlayQuery && localSuggestions.length === 0 && (
                 <div className="search-overlay-empty">
-                  <div className="mono text-secondary">NO RESULTS FOR "{query.toUpperCase()}"</div>
+                  <div className="mono text-secondary">NO RESULTS FOR "{overlayQuery.toUpperCase()}"</div>
                 </div>
               )}
               {!searchLoading && searchResults.map((book, idx) => (
@@ -1393,12 +1442,12 @@ function App() {
                   <ArrowRight size={14} style={{ color: 'var(--text-muted)' }} />
                 </div>
               ))}
-              {!query && !searchLoading && (
+              {!overlayQuery && !searchLoading && (
                 <div className="search-overlay-empty">
                   <div className="mono text-muted" style={{ fontSize: '11px', marginBottom: '16px' }}>POPULAR SEARCHES</div>
                   <div className="suggestion-chips" style={{ justifyContent: 'center' }}>
                     {['Pride and Prejudice', 'गोदान', 'Sherlock Holmes', 'रामचरितमानस', 'Shakespeare', 'Premchand'].map(s => (
-                      <button key={s} className="suggestion-chip" onClick={() => { setQuery(s); handleOverlaySearch(s); }}>{s}</button>
+                      <button key={s} className="suggestion-chip" onClick={() => { setOverlayQuery(s); handleOverlaySearch(s); }}>{s}</button>
                     ))}
                   </div>
                 </div>

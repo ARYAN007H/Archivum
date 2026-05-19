@@ -31,7 +31,14 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   // Try network first, then fall back to cache for API calls/books
-  if (event.request.url.includes('gutendex.com') || event.request.url.includes('corsproxy.io') || event.request.url.includes('gutenberg.org')) {
+  if (
+    event.request.url.includes('gutendex.com') || 
+    event.request.url.includes('corsproxy.io') || 
+    event.request.url.includes('gutenberg.org') ||
+    event.request.url.includes('archive.org') ||
+    event.request.url.includes('allorigins.win') ||
+    event.request.url.includes('codetabs.com')
+  ) {
     event.respondWith(
       caches.open('archivum-data-v1').then((cache) => {
         return fetch(event.request).then((response) => {

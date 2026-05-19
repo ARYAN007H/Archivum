@@ -133,7 +133,10 @@ const NativeReader = ({ book, onClose, user }) => {
   const [showToc, setShowToc] = useState(false);
   const [tocItems, setTocItems] = useState([]);
   const [currentChapterTitle, setCurrentChapterTitle] = useState('');
-  const [turnDirection, setTurnDirection] = useState('');
+  const [isFlipping, setIsFlipping] = useState(false);
+  const [flipDirection, setFlipDirection] = useState('');
+  const [flipPage, setFlipPage] = useState(0);
+  const [flipHtml, setFlipHtml] = useState('');
   
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -552,8 +555,21 @@ const NativeReader = ({ book, onClose, user }) => {
 
       const text = await fetchWithProxy(textUrl, 'text');
 
+      // Strip start/end headers from raw text
+      let cleanedText = text;
+      const startMatch = cleanedText.match(/\*\*\*\s*START OF (THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*/i);
+      const endMatch = cleanedText.match(/\*\*\*\s*END OF (THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*/i);
+      
+      if (startMatch) {
+        cleanedText = cleanedText.substring(startMatch.index + startMatch[0].length);
+      }
+      if (endMatch) {
+        cleanedText = cleanedText.substring(0, endMatch.index);
+      }
+      cleanedText = cleanedText.trim();
+
       // Parse plain text into structured HTML
-      const lines = text.split('\n');
+      const lines = cleanedText.split('\n');
       let fullHtml = '';
       let currentParagraph = '';
       let inParagraph = false;
@@ -564,15 +580,18 @@ const NativeReader = ({ book, onClose, user }) => {
         
         // Detect chapter/section headings (all caps lines, or lines starting with CHAPTER/BOOK)
         if (trimmed.length > 0 && trimmed.length < 80 && 
-            (trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && !/^[0-9\s\.\-_]+$/.test(trimmed)) ||
-            /^(CHAPTER|BOOK|PART|SECTION|VOLUME)\b/i.test(trimmed)) {
+            ((trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && !/^[0-9\s\.\-_]+$/.test(trimmed)) ||
+            /^(CHAPTER|BOOK|PART|SECTION|VOLUME|अध्याय)\b/i.test(trimmed))) {
           // Flush current paragraph
           if (currentParagraph.trim()) {
-            fullHtml += `<p>${currentParagraph.trim()}</p>`;
+            let pText = currentParagraph.trim();
+            pText = pText.replace(/_([^_]+)_/g, '<em>$1</em>');
+            pText = pText.replace(/\*([^\*]+)\*/g, '<strong>$1</strong>');
+            fullHtml += `<p>${pText}</p>`;
             currentParagraph = '';
           }
-          const tag = /^(CHAPTER|BOOK|PART|VOLUME)\b/i.test(trimmed) ? 'h2' : 'h3';
-          fullHtml += `<${tag}>${trimmed}</${tag}>`;
+          const tag = /^(CHAPTER|BOOK|PART|VOLUME|अध्याय)\b/i.test(trimmed) ? 'h2' : 'h3';
+          fullHtml += `<${tag} class="chapter-heading">${trimmed}</${tag}>`;
           inParagraph = false;
           continue;
         }
@@ -580,7 +599,10 @@ const NativeReader = ({ book, onClose, user }) => {
         // Empty line = paragraph break
         if (trimmed === '') {
           if (currentParagraph.trim()) {
-            fullHtml += `<p>${currentParagraph.trim()}</p>`;
+            let pText = currentParagraph.trim();
+            pText = pText.replace(/_([^_]+)_/g, '<em>$1</em>');
+            pText = pText.replace(/\*([^\*]+)\*/g, '<strong>$1</strong>');
+            fullHtml += `<p>${pText}</p>`;
             currentParagraph = '';
           }
           inParagraph = false;
@@ -598,7 +620,10 @@ const NativeReader = ({ book, onClose, user }) => {
       
       // Flush remaining
       if (currentParagraph.trim()) {
-        fullHtml += `<p>${currentParagraph.trim()}</p>`;
+        let pText = currentParagraph.trim();
+        pText = pText.replace(/_([^_]+)_/g, '<em>$1</em>');
+        pText = pText.replace(/\*([^\*]+)\*/g, '<strong>$1</strong>');
+        fullHtml += `<p>${pText}</p>`;
       }
 
       const parser = new DOMParser();
@@ -773,28 +798,46 @@ const NativeReader = ({ book, onClose, user }) => {
   }, [loading, page, spread]);
 
   const next = useCallback(() => {
+    if (isFlipping) return;
     setPage(p => {
       const newPage = Math.min(totalPages - 1, p + 1);
       if (newPage !== p) {
-        setTurnDirection('next');
-        setTimeout(() => setTurnDirection(''), 600);
+        if (contentRef.current) {
+          setFlipHtml(contentRef.current.innerHTML);
+        }
+        setFlipPage(p);
+        setFlipDirection('next');
+        setIsFlipping(true);
+        setTimeout(() => {
+          setIsFlipping(false);
+          setFlipDirection('');
+        }, 550);
       }
       saveData(newPage, undefined, undefined);
       return newPage;
     });
-  }, [totalPages]);
+  }, [totalPages, isFlipping]);
 
   const prev = useCallback(() => {
+    if (isFlipping) return;
     setPage(p => {
       const newPage = Math.max(0, p - 1);
       if (newPage !== p) {
-        setTurnDirection('prev');
-        setTimeout(() => setTurnDirection(''), 600);
+        if (contentRef.current) {
+          setFlipHtml(contentRef.current.innerHTML);
+        }
+        setFlipPage(p);
+        setFlipDirection('prev');
+        setIsFlipping(true);
+        setTimeout(() => {
+          setIsFlipping(false);
+          setFlipDirection('');
+        }, 550);
       }
       saveData(newPage, undefined, undefined);
       return newPage;
     });
-  }, []);
+  }, [isFlipping]);
 
   useEffect(() => {
     const handleKey = (e) => {
@@ -807,10 +850,20 @@ const NativeReader = ({ book, onClose, user }) => {
   }, [next, prev, onClose]);
 
   const getThemeVars = () => {
-    if (theme === 'night') return { bg: '#09080D', color: '#E8DFD0', accent: '#E04E2A', muted: 'rgba(255,255,255,0.08)' };
-    if (theme === 'sepia') return { bg: '#1A1209', color: '#D4B896', accent: '#BF9B5A', muted: 'rgba(255,255,255,0.06)' };
-    return { bg: '#F5F0E8', color: '#2C2416', accent: '#E04E2A', muted: 'rgba(0,0,0,0.06)' };
-  };
+    switch (theme) {
+      case 'ivory':
+        return { bg: '#FAF6EE', color: '#2E2A24', accent: '#C05C3E', muted: 'rgba(46, 42, 36, 0.06)' }
+      case 'sepia':
+        return { bg: '#F3EAD3', color: '#4A3B2C', accent: '#A97B30', muted: 'rgba(74, 59, 44, 0.08)' }
+      case 'forest':
+        return { bg: '#E6ECE4', color: '#283C2C', accent: '#5A7A5D', muted: 'rgba(40, 60, 44, 0.06)' }
+      case 'slate':
+        return { bg: '#1F242D', color: '#E2E6EC', accent: '#6F95D2', muted: 'rgba(255, 255, 255, 0.06)' }
+      case 'midnight':
+      default:
+        return { bg: '#0B0B0F', color: '#EBEBEE', accent: '#E25A38', muted: 'rgba(255, 255, 255, 0.07)' }
+    }
+  }
 
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
 
@@ -836,7 +889,8 @@ const NativeReader = ({ book, onClose, user }) => {
   const readerCursorRef = useRef(null);
 
   useEffect(() => {
-    if (isMobile) return;
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    if (isTouchDevice || isMobile) return;
     const handleGlobalMouseMove = (e) => {
       if (readerCursorRef.current) {
         readerCursorRef.current.style.left = e.clientX + 'px';
@@ -851,6 +905,8 @@ const NativeReader = ({ book, onClose, user }) => {
   }, []);
 
   useEffect(() => {
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    if (isTouchDevice) return;
     const sysDot = document.getElementById('cursor-dot');
     if (sysDot) sysDot.style.display = 'none';
     return () => { if (sysDot) sysDot.style.display = 'block'; };
@@ -1321,7 +1377,13 @@ const NativeReader = ({ book, onClose, user }) => {
               <div className="settings-group">
                 <div className="settings-label">THEME</div>
                 <div className="settings-row">
-                  {[{ key: 'night', bg: '#09080D', fg: '#E8DFD0' }, { key: 'sepia', bg: '#1A1209', fg: '#D4B896' }, { key: 'paper', bg: '#F5F0E8', fg: '#2C2416' }].map(t => (
+                  {[
+                    { key: 'ivory', bg: '#FAF6EE', fg: '#2E2A24', label: 'Ivory' },
+                    { key: 'sepia', bg: '#F3EAD3', fg: '#4A3B2C', label: 'Sepia' },
+                    { key: 'forest', bg: '#E6ECE4', fg: '#283C2C', label: 'Forest' },
+                    { key: 'slate', bg: '#1F242D', fg: '#E2E6EC', label: 'Slate' },
+                    { key: 'midnight', bg: '#0B0B0F', fg: '#EBEBEE', label: 'Midnight' }
+                  ].map(t => (
                     <button 
                       key={t.key}
                       onClick={() => setTheme(t.key)} 
@@ -1333,7 +1395,7 @@ const NativeReader = ({ book, onClose, user }) => {
                       }}
                     >
                       <span style={{ fontSize: '14px', fontFamily: "'Libre Baskerville', serif" }}>Aa</span>
-                      <span className="mono" style={{ fontSize: '8px', opacity: 0.7 }}>{t.key.toUpperCase()}</span>
+                      <span className="mono" style={{ fontSize: '8px', opacity: 0.7 }}>{t.label.toUpperCase()}</span>
                     </button>
                   ))}
                 </div>
@@ -1543,12 +1605,14 @@ const NativeReader = ({ book, onClose, user }) => {
             <div className="spread-spine" />
           )}    
           <div 
-            className={`page-slider ${turnDirection === 'next' ? 'turning-next' : turnDirection === 'prev' ? 'turning-prev' : ''}`}
+            className="page-slider"
             style={{
               transform: `translateX(-${page * 100}vw)`,
-              transition: turnDirection ? 'none' : 'transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+              transition: isFlipping ? 'none' : 'transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
               width: 'max-content',
-              height: '100%'
+              height: '100%',
+              opacity: isFlipping ? 0 : 1,
+              pointerEvents: isFlipping ? 'none' : 'auto'
             }}
           >
             <div 
@@ -1576,6 +1640,193 @@ const NativeReader = ({ book, onClose, user }) => {
             >
             </div>
           </div>
+
+          {/* 3D Page Flip Overlay */}
+          {isFlipping && (
+            <div 
+              className="book-flip-overlay"
+              style={{
+                backgroundColor: currentTheme.bg,
+                color: currentTheme.color,
+              }}
+            >
+              {effectiveSpread ? (
+                <>
+                  {/* Static Left Page (Fixed) */}
+                  <div className="book-page">
+                    <div 
+                      className="book-page-content"
+                      style={{
+                        columnWidth: colWidthCalc,
+                        columnCount: numCols,
+                        columnGap: `${gap}px`,
+                        paddingLeft: `${pad}px`,
+                        paddingRight: `${pad}px`,
+                        fontSize: `${fontSize}px`,
+                        lineHeight: lineHeight,
+                        color: currentTheme.color,
+                        fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
+                          ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
+                          : activeFontFamily,
+                        transform: `translateX(-${(flipDirection === 'next' ? flipPage : page) * 100}vw)`,
+                        left: 0
+                      }}
+                      dangerouslySetInnerHTML={{ __html: flipHtml }}
+                    />
+                  </div>
+
+                  {/* Static Right Page (Fixed) */}
+                  <div className="book-page">
+                    <div 
+                      className="book-page-content"
+                      style={{
+                        columnWidth: colWidthCalc,
+                        columnCount: numCols,
+                        columnGap: `${gap}px`,
+                        paddingLeft: `${pad}px`,
+                        paddingRight: `${pad}px`,
+                        fontSize: `${fontSize}px`,
+                        lineHeight: lineHeight,
+                        color: currentTheme.color,
+                        fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
+                          ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
+                          : activeFontFamily,
+                        transform: `translateX(-${(flipDirection === 'next' ? page : flipPage) * 100}vw)`,
+                        left: '-50vw'
+                      }}
+                      dangerouslySetInnerHTML={{ __html: flipHtml }}
+                    />
+                  </div>
+
+                  {/* Flipping Page */}
+                  <div className={`flipping-page-wrapper ${flipDirection === 'next' ? 'flip-next' : 'flip-prev'}`}>
+                    <div className="flipping-page-flipper">
+                      {/* Front Face */}
+                      <div className="flipping-page-face face-front">
+                        <div 
+                          className="book-page-content"
+                          style={{
+                            columnWidth: colWidthCalc,
+                            columnCount: numCols,
+                            columnGap: `${gap}px`,
+                            paddingLeft: `${pad}px`,
+                            paddingRight: `${pad}px`,
+                            fontSize: `${fontSize}px`,
+                            lineHeight: lineHeight,
+                            color: currentTheme.color,
+                            fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
+                              ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
+                              : activeFontFamily,
+                            transform: `translateX(-${flipPage * 100}vw)`,
+                            left: flipDirection === 'next' ? '-50vw' : '0'
+                          }}
+                          dangerouslySetInnerHTML={{ __html: flipHtml }}
+                        />
+                      </div>
+                      {/* Back Face */}
+                      <div className="flipping-page-face face-back">
+                        <div 
+                          className="book-page-content"
+                          style={{
+                            columnWidth: colWidthCalc,
+                            columnCount: numCols,
+                            columnGap: `${gap}px`,
+                            paddingLeft: `${pad}px`,
+                            paddingRight: `${pad}px`,
+                            fontSize: `${fontSize}px`,
+                            lineHeight: lineHeight,
+                            color: currentTheme.color,
+                            fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
+                              ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
+                              : activeFontFamily,
+                            transform: `translateX(-${page * 100}vw)`,
+                            left: flipDirection === 'next' ? '0' : '-50vw'
+                          }}
+                          dangerouslySetInnerHTML={{ __html: flipHtml }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="spread-spine" />
+                </>
+              ) : (
+                <>
+                  {/* Static Underneath Page */}
+                  <div className="book-page single">
+                    <div 
+                      className="book-page-content"
+                      style={{
+                        columnWidth: colWidthCalc,
+                        columnCount: numCols,
+                        columnGap: `${gap}px`,
+                        paddingLeft: `${pad}px`,
+                        paddingRight: `${pad}px`,
+                        fontSize: `${fontSize}px`,
+                        lineHeight: lineHeight,
+                        color: currentTheme.color,
+                        fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
+                          ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
+                          : activeFontFamily,
+                        transform: `translateX(-${page * 100}vw)`,
+                        left: 0
+                      }}
+                      dangerouslySetInnerHTML={{ __html: flipHtml }}
+                    />
+                  </div>
+
+                  {/* Flipping Page */}
+                  <div className={`flipping-page-wrapper single ${flipDirection === 'next' ? 'flip-next' : 'flip-prev'}`}>
+                    <div className="flipping-page-flipper">
+                      {/* Front Face */}
+                      <div className="flipping-page-face face-front">
+                        <div 
+                          className="book-page-content"
+                          style={{
+                            columnWidth: colWidthCalc,
+                            columnCount: numCols,
+                            columnGap: `${gap}px`,
+                            paddingLeft: `${pad}px`,
+                            paddingRight: `${pad}px`,
+                            fontSize: `${fontSize}px`,
+                            lineHeight: lineHeight,
+                            color: currentTheme.color,
+                            fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
+                              ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
+                              : activeFontFamily,
+                            transform: `translateX(-${flipPage * 100}vw)`,
+                            left: 0
+                          }}
+                          dangerouslySetInnerHTML={{ __html: flipHtml }}
+                        />
+                      </div>
+                      {/* Back Face */}
+                      <div className="flipping-page-face face-back">
+                        <div 
+                          className="book-page-content"
+                          style={{
+                            columnWidth: colWidthCalc,
+                            columnCount: numCols,
+                            columnGap: `${gap}px`,
+                            paddingLeft: `${pad}px`,
+                            paddingRight: `${pad}px`,
+                            fontSize: `${fontSize}px`,
+                            lineHeight: lineHeight,
+                            color: currentTheme.color,
+                            fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
+                              ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
+                              : activeFontFamily,
+                            transform: `translateX(-${page * 100}vw)`,
+                            left: 0
+                          }}
+                          dangerouslySetInnerHTML={{ __html: flipHtml }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Right arrow */}
