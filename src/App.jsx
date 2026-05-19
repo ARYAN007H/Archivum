@@ -146,7 +146,12 @@ const normalizeIABook = (doc) => {
 };
 
 const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '') => {
-  let q = 'mediatype:texts';
+  // Filter for actual books: require 'texts' mediatype + book-related collections
+  // Exclude known non-book collections (policies, reports, government docs)
+  let q = 'mediatype:texts AND (collection:opensource OR collection:books OR collection:gutenberg OR collection:additional_collections)';
+  q += ' AND NOT collection:governmentpublications AND NOT collection:usgovernmentdocuments';
+  q += ' AND NOT title:(policy OR "terms of use" OR "privacy policy" OR "annual report" OR "financial statement")';
+  
   if (langFilter === 'hi') {
     q += ' AND language:(Hindi OR hin)';
   } else if (langFilter === 'en') {
@@ -160,23 +165,22 @@ const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '') => {
   }
 
   const rows = 20;
-  const params = new URLSearchParams({
-    q,
-    'fl[]': 'identifier,title,creator,language,date,subject,description,downloads',
-    'sort[]': 'downloads desc',
-    rows: rows.toString(),
-    page: pageNum.toString(),
-    output: 'json',
-  });
-  // fl[] needs special handling
   const url = `${IA_SEARCH_URL}?q=${encodeURIComponent(q)}&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=language&fl[]=date&fl[]=subject&fl[]=downloads&sort[]=downloads+desc&rows=${rows}&page=${pageNum}&output=json`;
 
   const res = await fetch(url);
   const data = await res.json();
   const docs = data?.response?.docs || [];
   const numFound = data?.response?.numFound || 0;
+  
+  // Post-filter: remove items that look like non-books
+  const junkPatterns = /policy|terms of (use|service)|privacy|annual report|financial|memorandum|regulation|guideline|compliance/i;
+  const filtered = docs.filter(doc => {
+    const title = doc.title || '';
+    return !junkPatterns.test(title) && title.length > 1;
+  });
+  
   return {
-    results: docs.map(normalizeIABook),
+    results: filtered.map(normalizeIABook),
     hasMore: (pageNum * rows) < numFound,
     total: numFound,
   };
