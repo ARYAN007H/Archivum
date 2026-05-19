@@ -431,11 +431,10 @@ function App() {
   useEffect(() => {
     const handleMouseMove = (e) => {
       if (cursorRef.current) {
-        cursorRef.current.style.left = e.clientX + 'px';
-        cursorRef.current.style.top = e.clientY + 'px';
+        cursorRef.current.style.transform = `translate3d(${e.clientX}px, ${e.clientY}px, 0) translate(-50%, -50%)`;
       }
     };
-    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mousemove', handleMouseMove, { passive: true });
     document.body.style.cursor = 'none';
 
     // Hover logic
@@ -801,24 +800,7 @@ function App() {
             <button className="mono" onClick={() => setView('stats')} style={{ opacity: view === 'stats' ? 1 : 0.5, borderBottom: view === 'stats' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><BarChart3 size={14}/> STATS</button>
           </div>
 
-          {view === 'catalog' && (
-            <div style={{ display: 'flex', gap: '8px', marginRight: '16px' }}>
-              {['', 'fiction', 'drama', 'poetry', 'philosophy'].map(g => (
-                <button 
-                  key={g} 
-                  onClick={() => setGenre(g)}
-                  style={{
-                    padding: '6px 12px', borderRadius: '20px', fontFamily: 'JetBrains Mono', fontSize: '10px',
-                    color: genre === g ? '#fff' : 'var(--text-secondary)',
-                    background: genre === g ? 'var(--ember)' : 'transparent',
-                    transition: 'background 0.3s, color 0.3s'
-                  }}
-                >
-                  {g ? g.toUpperCase() : 'ALL'}
-                </button>
-              ))}
-            </div>
-          )}
+
           {user ? (
             <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '11px', color: 'var(--text-secondary)' }}>
               <span>{user.email}</span>

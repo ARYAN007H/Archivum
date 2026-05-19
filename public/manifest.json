@@ -1,7 +1,7 @@
 {
   "name": "Archivum",
   "short_name": "Archivum",
-  "description": "Seventy Thousand Stories. Every great book ever written. Free. Beautiful. Yours.",
+  "description": "Your Personal Library",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#06060A",

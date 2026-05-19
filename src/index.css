@@ -185,6 +185,11 @@ button {
 .skeleton-line.short { width: 60%; }
 .skeleton-line.tiny { width: 35%; height: 10px; }
 
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 /* ======================== */
 /* CMD+K SEARCH OVERLAY     */
 /* ======================== */
