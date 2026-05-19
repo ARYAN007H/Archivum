@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { ArrowLeft, ArrowRight, Settings, Maximize, Columns, Square, BookmarkPlus, Edit3, X, List, Search, ChevronUp, ChevronDown, Play, Square as SquareIcon, Volume2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Settings, Maximize, Columns, Square, BookmarkPlus, Edit3, X, List, Search, ChevronUp, ChevronDown, Play, Square as SquareIcon, Volume2, Type, AlignJustify, Minus, Plus } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 
 const stripGutenbergBoilerplate = (doc) => {
@@ -82,15 +82,54 @@ const fetchWithProxy = async (url, responseType = 'text') => {
   throw new Error(`All proxies failed for: ${url}`);
 };
 
+// Font family options
+const FONT_OPTIONS = [
+  { id: 'baskerville', name: 'Baskerville', family: "'Libre Baskerville', Georgia, serif" },
+  { id: 'palatino', name: 'Palatino', family: "'Palatino Linotype', 'Book Antiqua', Palatino, serif" },
+  { id: 'georgia', name: 'Georgia', family: "Georgia, 'Times New Roman', serif" },
+  { id: 'system', name: 'System', family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
+  { id: 'mono', name: 'Mono', family: "'JetBrains Mono', 'Fira Code', monospace" },
+];
+
+const MARGIN_OPTIONS = [
+  { id: 'compact', label: 'Compact', desktop: 40, mobile: 16 },
+  { id: 'comfortable', label: 'Comfortable', desktop: 60, mobile: 24 },
+  { id: 'wide', label: 'Wide', desktop: 100, mobile: 32 },
+];
+
+// Load persisted reader preferences
+const loadReaderPrefs = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem('archivum_reader_prefs') || '{}');
+    return {
+      fontSize: saved.fontSize || 17,
+      fontFamily: saved.fontFamily || 'baskerville',
+      lineHeight: saved.lineHeight || 1.85,
+      marginSize: saved.marginSize || 'comfortable',
+      theme: saved.theme || 'night',
+      spread: saved.spread !== undefined ? saved.spread : true,
+    };
+  } catch { return { fontSize: 17, fontFamily: 'baskerville', lineHeight: 1.85, marginSize: 'comfortable', theme: 'night', spread: true }; }
+};
+
+const saveReaderPrefs = (prefs) => {
+  try { localStorage.setItem('archivum_reader_prefs', JSON.stringify(prefs)); } catch {}
+};
+
 const NativeReader = ({ book, onClose, user }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   
+  const prefs = loadReaderPrefs();
   const [page, setPage] = useState(0);
-  const [spread, setSpread] = useState(true);
-  const [fontSize, setFontSize] = useState(17);
-  const [theme, setTheme] = useState('night');
+  const [spread, setSpread] = useState(prefs.spread);
+  const [fontSize, setFontSize] = useState(prefs.fontSize);
+  const [fontFamily, setFontFamily] = useState(prefs.fontFamily);
+  const [lineHeight, setLineHeight] = useState(prefs.lineHeight);
+  const [marginSize, setMarginSize] = useState(prefs.marginSize);
+  const [theme, setTheme] = useState(prefs.theme);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState('style'); // 'style' | 'layout'
   const [showToc, setShowToc] = useState(false);
   const [tocItems, setTocItems] = useState([]);
   const [currentChapterTitle, setCurrentChapterTitle] = useState('');
@@ -103,6 +142,7 @@ const NativeReader = ({ book, onClose, user }) => {
 
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [sessionTime, setSessionTime] = useState(0);
+  const [showTopBar, setShowTopBar] = useState(false);
 
   const sessionStartTime = useRef(Date.now());
   const touchStartX = useRef(0);
@@ -119,6 +159,11 @@ const NativeReader = ({ book, onClose, user }) => {
   // Storage logic
   const [highlights, setHighlights] = useState([]);
   const [bookmarks, setBookmarks] = useState([]);
+
+  // Persist reader prefs whenever they change
+  useEffect(() => {
+    saveReaderPrefs({ fontSize, fontFamily, lineHeight, marginSize, theme, spread });
+  }, [fontSize, fontFamily, lineHeight, marginSize, theme, spread]);
 
   // Fetch initial data
   useEffect(() => {
@@ -694,7 +739,7 @@ const NativeReader = ({ book, onClose, user }) => {
       const timer = setTimeout(calculatePages, 200);
       return () => clearTimeout(timer);
     }
-  }, [fontSize, spread, loading, calculatePages]);
+  }, [fontSize, fontFamily, lineHeight, marginSize, spread, loading, calculatePages]);
 
   useEffect(() => {
     let timer;
@@ -781,10 +826,12 @@ const NativeReader = ({ book, onClose, user }) => {
   // Exact math: viewportWidth = paddingLeft + col1 + gap + col2 + paddingRight
   // For spread (2 cols): colWidth = (100vw - 2*pad - gap) / 2
   // For single: colWidth = 100vw - 2*pad
-  const pad = isMobile ? 24 : 60;
+  const marginOption = MARGIN_OPTIONS.find(m => m.id === marginSize) || MARGIN_OPTIONS[1];
+  const pad = isMobile ? marginOption.mobile : marginOption.desktop;
   const gap = effectiveSpread ? 80 : 0;
   const numCols = effectiveSpread ? 2 : 1;
   const colWidthCalc = `calc((100vw - ${2 * pad}px - ${gap}px) / ${numCols})`;
+  const activeFontFamily = FONT_OPTIONS.find(f => f.id === fontFamily)?.family || FONT_OPTIONS[0].family;
 
   const readerCursorRef = useRef(null);
 
@@ -1197,12 +1244,21 @@ const NativeReader = ({ book, onClose, user }) => {
           )}
         </div>
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+          {/* TTS Button */}
+          <button onClick={handleTTS} style={{ color: isSpeaking ? currentTheme.accent : 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <Volume2 size={16} />
+            {isSpeaking && <span className="mono" style={{ fontSize: '9px' }}>STOP</span>}
+          </button>
           {!isMobile && (
-            <button onClick={() => setSpread(!spread)} style={{ color: spread ? 'var(--ember)' : 'var(--text-secondary)' }}>
-              {spread ? <Columns size={16} /> : <Square size={16} />}
-            </button>
+            <>
+              <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
+              {/* Session time */}
+              <span className="mono" style={{ fontSize: '9px', color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
+                {sessionTime > 0 ? `${sessionTime}m` : ''}
+              </span>
+            </>
           )}
-          <button onClick={() => setShowSettings(!showSettings)} style={{ color: showSettings ? 'var(--ember)' : 'var(--text-secondary)' }}>
+          <button onClick={() => { setShowSettings(!showSettings); setShowSearch(false); setShowToc(false); }} style={{ color: showSettings ? currentTheme.accent : 'var(--text-secondary)' }}>
             <Settings size={16} />
           </button>
         </div>
@@ -1238,32 +1294,155 @@ const NativeReader = ({ book, onClose, user }) => {
         </div>
       )}
 
-      {/* SETTINGS PANEL */}
+      {/* SETTINGS PANEL — Redesigned */}
       {showSettings && (
-        <div className="reader-settings" style={{ background: currentTheme.bg }}>
-          <div className="mono" style={{ fontSize: '10px', opacity: 0.5, marginBottom: '4px' }}>THEME</div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            {['night', 'sepia', 'paper'].map(t => (
-              <button 
-                key={t}
-                onClick={() => setTheme(t)} 
-                className="mono theme-btn" 
-                style={{ 
-                  color: theme === t ? currentTheme.accent : 'inherit',
-                  background: theme === t ? `${currentTheme.accent}15` : 'transparent',
-                  borderRadius: '4px'
-                }}
-              >
-                {t.toUpperCase()}
-              </button>
-            ))}
+        <div className="reader-settings-v2" style={{ background: currentTheme.bg, borderColor: currentTheme.muted }}>
+          {/* Settings Tabs */}
+          <div className="settings-tabs">
+            <button 
+              className={`settings-tab ${settingsTab === 'style' ? 'active' : ''}`}
+              onClick={() => setSettingsTab('style')}
+              style={{ color: settingsTab === 'style' ? currentTheme.accent : 'inherit', borderColor: settingsTab === 'style' ? currentTheme.accent : 'transparent' }}
+            >
+              <Type size={14} /> Style
+            </button>
+            <button 
+              className={`settings-tab ${settingsTab === 'layout' ? 'active' : ''}`}
+              onClick={() => setSettingsTab('layout')}
+              style={{ color: settingsTab === 'layout' ? currentTheme.accent : 'inherit', borderColor: settingsTab === 'layout' ? currentTheme.accent : 'transparent' }}
+            >
+              <AlignJustify size={14} /> Layout
+            </button>
           </div>
-          <div style={{ height: '1px', background: currentTheme.muted }} />
-          <div className="mono" style={{ fontSize: '10px', opacity: 0.5, marginBottom: '4px' }}>FONT SIZE</div>
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-            <button onClick={() => setFontSize(f => Math.max(12, f - 1))} className="mono font-btn">A−</button>
-            <span className="mono" style={{ minWidth: '40px', textAlign: 'center' }}>{fontSize}PX</span>
-            <button onClick={() => setFontSize(f => Math.min(28, f + 1))} className="mono font-btn">A+</button>
+
+          {settingsTab === 'style' && (
+            <div className="settings-content">
+              {/* Theme */}
+              <div className="settings-group">
+                <div className="settings-label">THEME</div>
+                <div className="settings-row">
+                  {[{ key: 'night', bg: '#09080D', fg: '#E8DFD0' }, { key: 'sepia', bg: '#1A1209', fg: '#D4B896' }, { key: 'paper', bg: '#F5F0E8', fg: '#2C2416' }].map(t => (
+                    <button 
+                      key={t.key}
+                      onClick={() => setTheme(t.key)} 
+                      className={`theme-swatch ${theme === t.key ? 'active' : ''}`}
+                      style={{ 
+                        background: t.bg,
+                        color: t.fg,
+                        borderColor: theme === t.key ? currentTheme.accent : currentTheme.muted
+                      }}
+                    >
+                      <span style={{ fontSize: '14px', fontFamily: "'Libre Baskerville', serif" }}>Aa</span>
+                      <span className="mono" style={{ fontSize: '8px', opacity: 0.7 }}>{t.key.toUpperCase()}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Font Family */}
+              <div className="settings-group">
+                <div className="settings-label">FONT</div>
+                <div className="font-picker">
+                  {FONT_OPTIONS.map(f => (
+                    <button
+                      key={f.id}
+                      className={`font-option ${fontFamily === f.id ? 'active' : ''}`}
+                      onClick={() => setFontFamily(f.id)}
+                      style={{ 
+                        fontFamily: f.family,
+                        borderColor: fontFamily === f.id ? currentTheme.accent : currentTheme.muted,
+                        background: fontFamily === f.id ? `${currentTheme.accent}12` : 'transparent'
+                      }}
+                    >
+                      <span style={{ fontSize: '16px' }}>Ag</span>
+                      <span className="mono" style={{ fontSize: '8px', opacity: 0.6 }}>{f.name.toUpperCase()}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Font Size */}
+              <div className="settings-group">
+                <div className="settings-label">SIZE</div>
+                <div className="settings-slider-row">
+                  <button onClick={() => setFontSize(f => Math.max(12, f - 1))} className="settings-btn"><Minus size={14} /></button>
+                  <div className="settings-slider-track">
+                    <div className="settings-slider-fill" style={{ width: `${((fontSize - 12) / 16) * 100}%`, background: currentTheme.accent }} />
+                    <span className="settings-slider-value">{fontSize}</span>
+                  </div>
+                  <button onClick={() => setFontSize(f => Math.min(28, f + 1))} className="settings-btn"><Plus size={14} /></button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {settingsTab === 'layout' && (
+            <div className="settings-content">
+              {/* Line Height */}
+              <div className="settings-group">
+                <div className="settings-label">LINE HEIGHT</div>
+                <div className="settings-slider-row">
+                  <button onClick={() => setLineHeight(h => Math.max(1.4, +(h - 0.1).toFixed(1)))} className="settings-btn"><Minus size={14} /></button>
+                  <div className="settings-slider-track">
+                    <div className="settings-slider-fill" style={{ width: `${((lineHeight - 1.4) / 0.8) * 100}%`, background: currentTheme.accent }} />
+                    <span className="settings-slider-value">{lineHeight.toFixed(1)}×</span>
+                  </div>
+                  <button onClick={() => setLineHeight(h => Math.min(2.2, +(h + 0.1).toFixed(1)))} className="settings-btn"><Plus size={14} /></button>
+                </div>
+              </div>
+
+              {/* Margins */}
+              <div className="settings-group">
+                <div className="settings-label">MARGINS</div>
+                <div className="settings-row">
+                  {MARGIN_OPTIONS.map(m => (
+                    <button
+                      key={m.id}
+                      className={`margin-option ${marginSize === m.id ? 'active' : ''}`}
+                      onClick={() => setMarginSize(m.id)}
+                      style={{ borderColor: marginSize === m.id ? currentTheme.accent : currentTheme.muted, background: marginSize === m.id ? `${currentTheme.accent}12` : 'transparent' }}
+                    >
+                      <div className="margin-preview" style={{ borderColor: currentTheme.muted }}>
+                        <div style={{ background: currentTheme.muted, height: '2px', width: m.id === 'compact' ? '90%' : m.id === 'comfortable' ? '70%' : '50%', borderRadius: '1px' }} />
+                        <div style={{ background: currentTheme.muted, height: '2px', width: m.id === 'compact' ? '85%' : m.id === 'comfortable' ? '65%' : '45%', borderRadius: '1px' }} />
+                        <div style={{ background: currentTheme.muted, height: '2px', width: m.id === 'compact' ? '88%' : m.id === 'comfortable' ? '68%' : '48%', borderRadius: '1px' }} />
+                      </div>
+                      <span className="mono" style={{ fontSize: '8px', opacity: 0.6 }}>{m.label.toUpperCase()}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Spread toggle (desktop only) */}
+              {!isMobile && (
+                <div className="settings-group">
+                  <div className="settings-label">COLUMNS</div>
+                  <div className="settings-row">
+                    <button
+                      className={`margin-option ${!spread ? 'active' : ''}`}
+                      onClick={() => setSpread(false)}
+                      style={{ borderColor: !spread ? currentTheme.accent : currentTheme.muted, background: !spread ? `${currentTheme.accent}12` : 'transparent' }}
+                    >
+                      <Square size={16} style={{ opacity: 0.5 }} />
+                      <span className="mono" style={{ fontSize: '8px', opacity: 0.6 }}>SINGLE</span>
+                    </button>
+                    <button
+                      className={`margin-option ${spread ? 'active' : ''}`}
+                      onClick={() => setSpread(true)}
+                      style={{ borderColor: spread ? currentTheme.accent : currentTheme.muted, background: spread ? `${currentTheme.accent}12` : 'transparent' }}
+                    >
+                      <Columns size={16} style={{ opacity: 0.5 }} />
+                      <span className="mono" style={{ fontSize: '8px', opacity: 0.6 }}>SPREAD</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Live Preview */}
+          <div className="settings-preview" style={{ background: currentTheme.muted, color: currentTheme.color, fontFamily: activeFontFamily, fontSize: `${Math.min(fontSize, 15)}px`, lineHeight: lineHeight }}>
+            The quick brown fox jumps over the lazy dog. In a quiet village, under the vast canopy of ancient trees…
           </div>
         </div>
       )}
@@ -1385,10 +1564,11 @@ const NativeReader = ({ book, onClose, user }) => {
                 paddingLeft: `${pad}px`,
                 paddingRight: `${pad}px`,
                 fontSize: `${fontSize}px`,
+                lineHeight: lineHeight,
                 color: currentTheme.color,
                 fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
                   ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
-                  : undefined,
+                  : activeFontFamily,
                 boxSizing: 'border-box',
                 overflow: 'hidden',
                 wordBreak: 'break-word',

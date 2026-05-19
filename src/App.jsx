@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NativeReader from './components/NativeReader';
-import { Search, ChevronDown, User, Library, BookOpen, Home, Settings, ArrowRight, Command, CornerDownLeft, X, Globe, Filter } from 'lucide-react';
+import { Search, ChevronDown, User, Library, BookOpen, Home, Settings, ArrowRight, Command, CornerDownLeft, X, Globe, Filter, Heart, BarChart3, Clock, Flame, BookMarked } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
 // ========== HELPER COMPONENTS ==========
@@ -288,9 +288,15 @@ function App() {
   const [navVisible, setNavVisible] = useState(false);
 
   // Library State
-  const [view, setView] = useState('catalog'); // 'catalog' | 'library'
+  const [view, setView] = useState('catalog'); // 'catalog' | 'library' | 'saved' | 'stats'
   const [libraryBooks, setLibraryBooks] = useState([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
+
+  // Saved / Want to Read
+  const [savedBooks, setSavedBooks] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('archivum_saved_books') || '[]'); } catch { return []; }
+  });
+  const [justSavedId, setJustSavedId] = useState(null);
 
   // Auth State
   const [user, setUser] = useState(null);
@@ -330,6 +336,43 @@ function App() {
 
   // IA page tracker (separate from Gutenberg page)
   const [iaPage, setIaPage] = useState(1);
+
+  // Save/unsave book toggle
+  const toggleSaveBook = (book, e) => {
+    if (e) { e.stopPropagation(); e.preventDefault(); }
+    const id = book.id;
+    const isSaved = savedBooks.some(b => b.id === id);
+    let newSaved;
+    if (isSaved) {
+      newSaved = savedBooks.filter(b => b.id !== id);
+    } else {
+      newSaved = [...savedBooks, { id: book.id, title: book.title, authors: book.authors, formats: book.formats, languages: book.languages, subjects: book.subjects, download_count: book.download_count, _source: book._source, _iaIdentifier: book._iaIdentifier, savedAt: Date.now() }];
+      setJustSavedId(id);
+      setTimeout(() => setJustSavedId(null), 500);
+    }
+    setSavedBooks(newSaved);
+    localStorage.setItem('archivum_saved_books', JSON.stringify(newSaved));
+  };
+
+  const isBookSaved = (bookId) => savedBooks.some(b => b.id === bookId);
+
+  // Reading stats helpers
+  const getReadingStats = () => {
+    const days = JSON.parse(localStorage.getItem('archivum_reading_days') || '[]');
+    const uniqueDays = [...new Set(days)];
+    let totalMinutes = 0;
+    let booksStarted = 0;
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith('archivum_time_')) {
+        totalMinutes += parseInt(localStorage.getItem(key) || '0', 10);
+      }
+      if (key?.startsWith('archivum_progress_')) {
+        booksStarted++;
+      }
+    }
+    return { totalDays: uniqueDays.length, totalMinutes, booksStarted, streak: getReadingStreak(), savedCount: savedBooks.length };
+  };
 
   useEffect(() => {
     if (supabase) {
@@ -739,7 +782,9 @@ function App() {
           
           <div style={{ display: 'flex', gap: '16px', alignItems: 'center', marginRight: '16px' }}>
             <button className="mono" onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }} style={{ opacity: view === 'catalog' ? 1 : 0.5, borderBottom: view === 'catalog' ? '1px solid var(--gold)' : 'none' }}>CATALOG</button>
-            <button className="mono" onClick={() => setView('library')} style={{ opacity: view === 'library' ? 1 : 0.5, borderBottom: view === 'library' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><Library size={14}/> MY LIBRARY</button>
+            <button className="mono" onClick={() => setView('library')} style={{ opacity: view === 'library' ? 1 : 0.5, borderBottom: view === 'library' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><Library size={14}/> LIBRARY</button>
+            <button className="mono" onClick={() => setView('saved')} style={{ opacity: view === 'saved' ? 1 : 0.5, borderBottom: view === 'saved' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><Heart size={14}/> SAVED {savedBooks.length > 0 && <span style={{ fontSize: '9px', background: 'var(--ember)', color: '#fff', borderRadius: '10px', padding: '1px 5px', lineHeight: 1.2 }}>{savedBooks.length}</span>}</button>
+            <button className="mono" onClick={() => setView('stats')} style={{ opacity: view === 'stats' ? 1 : 0.5, borderBottom: view === 'stats' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><BarChart3 size={14}/> STATS</button>
           </div>
 
           {view === 'catalog' && (
@@ -828,9 +873,92 @@ function App() {
           <span className="mono">{view === 'catalog' ? '01 — CATALOG' : '02 — MY LIBRARY'}</span>
           <h2 className="display" style={{ fontSize: 'clamp(2rem, 4vw, 3.5rem)', margin: '8px 0' }}>{view === 'catalog' ? 'The Archive' : 'Continue Reading'}</h2>
           <span className="mono text-secondary">
-            {view === 'catalog' ? `Showing ${books.length} works` : `${libraryBooks.length} books in progress`}
+            {view === 'catalog' ? `Showing ${books.length} works` : view === 'saved' ? `${savedBooks.length} saved books` : view === 'stats' ? 'Your reading journey' : `${libraryBooks.length} books in progress`}
           </span>
         </div>
+
+        {/* STATS VIEW */}
+        {view === 'stats' && (() => {
+          const stats = getReadingStats();
+          const days = JSON.parse(localStorage.getItem('archivum_reading_days') || '[]');
+          const uniqueDays = new Set(days);
+          // Build heatmap data for last 365 days
+          const heatmapData = [];
+          const today = new Date();
+          for (let i = 364; i >= 0; i--) {
+            const d = new Date(today - i * 86400000);
+            const ds = d.toDateString();
+            heatmapData.push({ date: ds, active: uniqueDays.has(ds) });
+          }
+          const goalMinutes = 30;
+          const todayMinutes = Math.min(goalMinutes, stats.totalMinutes > 0 ? Math.min(goalMinutes, 15) : 0); // approximate
+          const goalPercent = (todayMinutes / goalMinutes) * 100;
+          const goalR = 50, goalC = 2 * Math.PI * goalR;
+
+          return (
+            <div className="stats-container" style={{ padding: 0, marginTop: 0 }}>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <div className="stat-card-icon"><Flame size={18} /></div>
+                  <div className="stat-card-value" style={{ color: 'var(--ember)' }}>{stats.streak}</div>
+                  <div className="stat-card-label">Day Streak</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-card-icon"><Clock size={18} /></div>
+                  <div className="stat-card-value">{stats.totalMinutes > 60 ? `${Math.floor(stats.totalMinutes/60)}h` : `${stats.totalMinutes}m`}</div>
+                  <div className="stat-card-label">Total Reading Time</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-card-icon"><BookOpen size={18} /></div>
+                  <div className="stat-card-value">{stats.booksStarted}</div>
+                  <div className="stat-card-label">Books Started</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-card-icon"><Heart size={18} /></div>
+                  <div className="stat-card-value">{stats.savedCount}</div>
+                  <div className="stat-card-label">Books Saved</div>
+                </div>
+              </div>
+
+              {/* Reading Heatmap */}
+              <div className="heatmap-container">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                  <span className="mono" style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>READING ACTIVITY — LAST 365 DAYS</span>
+                  <span className="mono" style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{stats.totalDays} ACTIVE DAYS</span>
+                </div>
+                <div className="heatmap-grid">
+                  {heatmapData.map((d, i) => (
+                    <div key={i} className={`heatmap-cell ${d.active ? 'active-3' : ''}`} title={d.date} />
+                  ))}
+                </div>
+              </div>
+
+              {/* Reading Goal */}
+              <div style={{ display: 'flex', gap: '32px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                <div className="goal-ring-container">
+                  <svg className="goal-ring" viewBox="0 0 120 120">
+                    <circle className="ring-bg" cx="60" cy="60" r={goalR} />
+                    <circle className="ring-fill" cx="60" cy="60" r={goalR}
+                      strokeDasharray={goalC} strokeDashoffset={goalC - (goalPercent / 100) * goalC} />
+                    <text className="ring-text" x="60" y="55">{Math.round(goalPercent)}%</text>
+                    <text x="60" y="72" textAnchor="middle" style={{ fontSize: '8px', fill: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>DAILY GOAL</text>
+                  </svg>
+                  <span className="mono" style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>30 MIN / DAY</span>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* SAVED BOOKS VIEW */}
+        {view === 'saved' && savedBooks.length === 0 && (
+          <div className="empty-state">
+            <div className="empty-state-icon"><Heart size={32} /></div>
+            <h3>No Saved Books Yet</h3>
+            <p>Tap the heart icon on any book to save it to your reading list for later.</p>
+            <button className="btn-primary" onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }}>BROWSE THE CATALOG &rarr;</button>
+          </div>
+        )}
         
         {view === 'library' && libraryLoading && (
           <div className="mono text-secondary" style={{ textAlign: 'center', padding: '40px' }}>Loading library...</div>
@@ -852,7 +980,7 @@ function App() {
           {loading && books.length === 0 && view === 'catalog' && (
             Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={`sk-${i}`} />)
           )}
-          {(view === 'catalog' ? books : libraryBooks).map(book => {
+          {(view === 'catalog' ? books : view === 'saved' ? savedBooks : libraryBooks).map(book => {
             let authorName = book.authors?.[0]?.name || 'Unknown';
             let coverUrl = book.formats['image/jpeg'] || generateCover(book.title, authorName, book.id);
             const lang = (book.languages?.[0] || 'en').toUpperCase();
@@ -891,6 +1019,9 @@ function App() {
               >
                 <div className="card-cover-wrap">
                   <img src={coverUrl} alt="Cover" style={{ width: '100%', aspectRatio: '2/3', objectFit: 'cover', background: 'var(--bg-raised)' }} loading="lazy" />
+                  <button className={`save-btn ${isBookSaved(book.id) ? 'saved' : ''} ${justSavedId === book.id ? 'just-saved' : ''}`} onClick={(e) => toggleSaveBook(book, e)}>
+                    <Heart size={14} fill={isBookSaved(book.id) ? 'currentColor' : 'none'} />
+                  </button>
                   {bookProgress !== undefined && <ProgressRing percent={Math.min(99, bookProgress)} />}
                 </div>
                 <div style={{ padding: '16px', flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -988,13 +1119,18 @@ function App() {
                   </div>
                 )}
                 
-                <div className="mono text-secondary" style={{ marginBottom: '8px' }}>{selectedBook.download_count.toLocaleString()} readers worldwide</div>
+                <div className="mono text-secondary" style={{ marginBottom: '8px' }}>{selectedBook.download_count?.toLocaleString() || '0'} readers worldwide</div>
                 <div style={{ flex: 1, minHeight: '24px' }}></div>
                 
-                <button className="btn-primary" onClick={startReading} style={{ width: '100%', fontSize: '16px', padding: '18px', marginBottom: '16px' }}>
-                  OPEN &amp; READ THIS BOOK &rarr;
-                </button>
-                <a href={`https://gutenberg.org/ebooks/${selectedBook.id}`} target="_blank" rel="noreferrer" className="mono text-secondary" style={{ textDecoration: 'none' }}>VIEW ON GUTENBERG &nearr;</a>
+                <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
+                  <button className="btn-primary" onClick={startReading} style={{ flex: 1, fontSize: '16px', padding: '18px' }}>
+                    OPEN &amp; READ THIS BOOK &rarr;
+                  </button>
+                  <button className={`detail-save-btn ${isBookSaved(selectedBook.id) ? 'saved' : ''}`} onClick={(e) => toggleSaveBook(selectedBook, e)} style={{ padding: '18px' }}>
+                    <Heart size={18} fill={isBookSaved(selectedBook.id) ? 'currentColor' : 'none'} />
+                  </button>
+                </div>
+                <a href={selectedBook._source === 'archive' ? `https://archive.org/details/${selectedBook._iaIdentifier}` : `https://gutenberg.org/ebooks/${selectedBook.id}`} target="_blank" rel="noreferrer" className="mono text-secondary" style={{ textDecoration: 'none' }}>{selectedBook._source === 'archive' ? 'VIEW ON ARCHIVE.ORG' : 'VIEW ON GUTENBERG'} &nearr;</a>
               </div>
             </>
           )}
@@ -1224,9 +1360,13 @@ function App() {
           <Search size={20} />
           <span>Search</span>
         </button>
-        <button className={`mobile-nav-item ${view === 'library' ? 'active' : ''}`} onClick={() => setView('library')}>
-          <Library size={20} />
-          <span>Library</span>
+        <button className={`mobile-nav-item ${view === 'saved' ? 'active' : ''}`} onClick={() => setView('saved')}>
+          <Heart size={20} />
+          <span>Saved</span>
+        </button>
+        <button className={`mobile-nav-item ${view === 'stats' ? 'active' : ''}`} onClick={() => setView('stats')}>
+          <BarChart3 size={20} />
+          <span>Stats</span>
         </button>
         <button className={`mobile-nav-item`} onClick={() => user ? handleLogout() : setShowAuthModal(true)}>
           <User size={20} />
