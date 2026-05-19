@@ -154,6 +154,21 @@ const NativeReader = ({ book, onClose, user }) => {
       setLoading(true);
       const { savedHighlights } = await loadSavedData();
 
+      // Internet Archive books: resolve actual download URLs first
+      if (book._source === 'archive' && book._iaIdentifier) {
+        try {
+          await loadIABook(book._iaIdentifier, savedHighlights);
+          return;
+        } catch (err) {
+          console.error('IA load error:', err);
+          if (isMounted) {
+            setError('Unable to load this book from Internet Archive. The book may only be available as scanned PDF.');
+            setLoading(false);
+          }
+          return;
+        }
+      }
+
       const epubUrl = book.formats['application/epub+zip'];
       if (!epubUrl) {
         await loadHtmlTier(savedHighlights);
@@ -272,6 +287,156 @@ const NativeReader = ({ book, onClose, user }) => {
 
     return () => { isMounted = false; };
   }, [book, user]);
+
+  // ========== Internet Archive book loader ==========
+  const loadIABook = async (identifier, savedHighlights) => {
+    // Fetch metadata to find downloadable files
+    const metaRes = await fetch(`https://archive.org/metadata/${identifier}/files`);
+    const metaData = await metaRes.json();
+    const files = metaData?.result || [];
+
+    // Find EPUB file
+    let epubFile = files.find(f => f.name?.toLowerCase().endsWith('.epub'));
+    // Find text file
+    let textFile = files.find(f => {
+      const name = f.name?.toLowerCase() || '';
+      return name.endsWith('.txt') && !name.includes('meta') && !name.includes('files');
+    });
+    // Find HTML file
+    let htmlFile = files.find(f => {
+      const name = f.name?.toLowerCase() || '';
+      return (name.endsWith('.html') || name.endsWith('.htm')) && !name.includes('meta');
+    });
+
+    const baseUrl = `https://archive.org/download/${identifier}`;
+
+    if (epubFile) {
+      try {
+        const epubUrl = `${baseUrl}/${encodeURIComponent(epubFile.name)}`;
+        const arrayBuffer = await fetch(epubUrl).then(r => {
+          if (!r.ok) throw new Error('EPUB fetch failed');
+          return r.arrayBuffer();
+        });
+
+        const JSZip = window.JSZip;
+        if (!JSZip) throw new Error('JSZip not loaded');
+        const zip = await JSZip.loadAsync(arrayBuffer);
+
+        // Parse container.xml
+        const containerFile = zip.file('META-INF/container.xml');
+        if (!containerFile) throw new Error('No container.xml');
+        const containerXml = await containerFile.async('string');
+        const parser = new DOMParser();
+        const containerDoc = parser.parseFromString(containerXml, 'application/xml');
+        const rootfile = Array.from(containerDoc.getElementsByTagName('*')).find(el => el.localName === 'rootfile');
+        const opfPath = rootfile.getAttribute('full-path');
+
+        const opfBaseDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
+        const resolveOpfPath = (href) => opfBaseDir + href;
+
+        const opfFile = zip.file(opfPath);
+        if (!opfFile) throw new Error('OPF not found');
+        const opfXml = await opfFile.async('string');
+        const opfDoc = parser.parseFromString(opfXml, 'application/xml');
+
+        const manifest = {};
+        const items = Array.from(opfDoc.getElementsByTagName('*')).filter(el => el.localName === 'item');
+        for (const item of items) {
+          manifest[item.getAttribute('id')] = item.getAttribute('href');
+        }
+
+        const itemrefs = Array.from(opfDoc.getElementsByTagName('*')).filter(el => el.localName === 'itemref');
+        const spineIds = itemrefs.map(itemref => itemref.getAttribute('idref'));
+
+        let finalHtml = '';
+        for (const id of spineIds) {
+          const href = manifest[id];
+          if (!href) continue;
+          const fullPath = resolveOpfPath(decodeURIComponent(href));
+          const chapterFile = zip.file(fullPath);
+          if (!chapterFile) continue;
+
+          const chapterHtml = await chapterFile.async('string');
+          const chapterDoc = parser.parseFromString(chapterHtml, 'text/html');
+          chapterDoc.querySelectorAll('style, link, script').forEach(el => el.remove());
+
+          // Skip Gutenberg boilerplate stripping for IA books
+
+          chapterDoc.body.querySelectorAll('*').forEach(el => {
+            const safeStyles = [];
+            if (el.style.textAlign) safeStyles.push(`text-align: ${el.style.textAlign}`);
+            if (el.style.fontStyle) safeStyles.push(`font-style: ${el.style.fontStyle}`);
+            if (el.style.fontWeight) safeStyles.push(`font-weight: ${el.style.fontWeight}`);
+            el.removeAttribute('style');
+            if (safeStyles.length > 0) el.setAttribute('style', safeStyles.join('; '));
+          });
+
+          finalHtml += `<div class="chapter-break"></div>${chapterDoc.body.innerHTML}`;
+        }
+
+        htmlToInject.current = finalHtml;
+        highlightsToRestore.current = savedHighlights;
+        setLoading(false);
+        return;
+      } catch (epubErr) {
+        console.warn('IA EPUB parse failed, trying text:', epubErr);
+      }
+    }
+
+    // Fallback: try text file
+    if (textFile) {
+      const textUrl = `${baseUrl}/${encodeURIComponent(textFile.name)}`;
+      const text = await fetch(textUrl).then(r => r.text());
+
+      const lines = text.split('\n');
+      let fullHtml = '';
+      let currentParagraph = '';
+
+      for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        if (trimmed.length > 0 && trimmed.length < 80 &&
+            ((trimmed === trimmed.toUpperCase() && /[A-Z\u0900-\u097F]/.test(trimmed)) ||
+            /^(CHAPTER|BOOK|PART|SECTION|VOLUME|\u0905\u0927\u094d\u092f\u093e\u092f|\u092a\u0930\u093f\u091a\u094d\u091b\u0947\u0926)\b/i.test(trimmed))) {
+          if (currentParagraph.trim()) {
+            fullHtml += `<p>${currentParagraph.trim()}</p>`;
+            currentParagraph = '';
+          }
+          fullHtml += `<h2>${trimmed}</h2>`;
+          continue;
+        }
+        if (trimmed === '') {
+          if (currentParagraph.trim()) {
+            fullHtml += `<p>${currentParagraph.trim()}</p>`;
+            currentParagraph = '';
+          }
+          continue;
+        }
+        currentParagraph += (currentParagraph ? ' ' : '') + trimmed;
+      }
+      if (currentParagraph.trim()) fullHtml += `<p>${currentParagraph.trim()}</p>`;
+
+      htmlToInject.current = fullHtml;
+      highlightsToRestore.current = savedHighlights || [];
+      setLoading(false);
+      return;
+    }
+
+    // Fallback: try HTML
+    if (htmlFile) {
+      const htmlUrl = `${baseUrl}/${encodeURIComponent(htmlFile.name)}`;
+      const htmlText = await fetch(htmlUrl).then(r => r.text());
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlText, 'text/html');
+      doc.querySelectorAll('style, link, script, meta, title').forEach(el => el.remove());
+
+      htmlToInject.current = doc.body.innerHTML;
+      highlightsToRestore.current = savedHighlights || [];
+      setLoading(false);
+      return;
+    }
+
+    throw new Error('No readable format found in this Internet Archive item.');
+  };
 
   // Tier 2: Fetch HTML version from Gutenberg
   const loadHtmlTier = async (savedHighlights) => {
@@ -1221,6 +1386,9 @@ const NativeReader = ({ book, onClose, user }) => {
                 paddingRight: `${pad}px`,
                 fontSize: `${fontSize}px`,
                 color: currentTheme.color,
+                fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
+                  ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
+                  : undefined,
                 boxSizing: 'border-box',
                 overflow: 'hidden',
                 wordBreak: 'break-word',

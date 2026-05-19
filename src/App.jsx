@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NativeReader from './components/NativeReader';
-import { Search, ChevronDown, User, Library, BookOpen, Home, Settings, ArrowRight, Command, CornerDownLeft, X } from 'lucide-react';
+import { Search, ChevronDown, User, Library, BookOpen, Home, Settings, ArrowRight, Command, CornerDownLeft, X, Globe, Filter } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
 // ========== HELPER COMPONENTS ==========
@@ -111,6 +111,170 @@ const generateCover = (title, author, id) => {
   return canvas.toDataURL();
 };
 
+// ========== INTERNET ARCHIVE API ==========
+
+const IA_SEARCH_URL = 'https://archive.org/advancedsearch.php';
+const IA_COVER_URL = 'https://archive.org/services/img';
+
+const normalizeIABook = (doc) => {
+  const identifier = doc.identifier;
+  const creatorRaw = doc.creator;
+  const authorName = Array.isArray(creatorRaw) ? creatorRaw[0] : (creatorRaw || 'Unknown');
+  const langRaw = doc.language;
+  const lang = Array.isArray(langRaw) ? langRaw[0] : (langRaw || 'hin');
+  const langCode = lang.length <= 3 ? lang.toLowerCase() : (lang.toLowerCase() === 'hindi' ? 'hi' : 'en');
+  const subjects = Array.isArray(doc.subject) ? doc.subject : (doc.subject ? [doc.subject] : []);
+
+  return {
+    id: `ia_${identifier}`,
+    _iaIdentifier: identifier,
+    _source: 'archive',
+    title: doc.title || 'Untitled',
+    authors: [{ name: authorName }],
+    formats: {
+      'image/jpeg': `${IA_COVER_URL}/${identifier}`,
+      'application/epub+zip': null,
+      'text/html': null,
+      'text/plain': null,
+    },
+    subjects: subjects.slice(0, 6),
+    download_count: doc.downloads || 0,
+    languages: [langCode],
+    bookshelves: [],
+    _needsMetadata: true,
+  };
+};
+
+const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '') => {
+  let q = 'mediatype:texts';
+  if (langFilter === 'hi') {
+    q += ' AND language:(Hindi OR hin)';
+  } else if (langFilter === 'en') {
+    q += ' AND language:(English OR eng OR en)';
+  }
+  if (searchQuery) {
+    q += ` AND (title:(${searchQuery}) OR creator:(${searchQuery}))`;
+  } else {
+    // Default: popular Hindi + multilingual literature
+    if (!langFilter) q += ' AND language:(Hindi OR hin OR English OR eng)';
+  }
+
+  const rows = 20;
+  const params = new URLSearchParams({
+    q,
+    'fl[]': 'identifier,title,creator,language,date,subject,description,downloads',
+    'sort[]': 'downloads desc',
+    rows: rows.toString(),
+    page: pageNum.toString(),
+    output: 'json',
+  });
+  // fl[] needs special handling
+  const url = `${IA_SEARCH_URL}?q=${encodeURIComponent(q)}&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=language&fl[]=date&fl[]=subject&fl[]=downloads&sort[]=downloads+desc&rows=${rows}&page=${pageNum}&output=json`;
+
+  const res = await fetch(url);
+  const data = await res.json();
+  const docs = data?.response?.docs || [];
+  const numFound = data?.response?.numFound || 0;
+  return {
+    results: docs.map(normalizeIABook),
+    hasMore: (pageNum * rows) < numFound,
+    total: numFound,
+  };
+};
+
+const fetchIASearch = async (query) => {
+  if (!query.trim()) return [];
+  const url = `${IA_SEARCH_URL}?q=mediatype:texts+AND+(title:(${encodeURIComponent(query)})+OR+creator:(${encodeURIComponent(query)}))&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=language&fl[]=downloads&sort[]=downloads+desc&rows=6&page=1&output=json`;
+  const res = await fetch(url);
+  const data = await res.json();
+  return (data?.response?.docs || []).map(normalizeIABook);
+};
+
+// ========== CURATED SUGGESTIONS ==========
+
+const CURATED_SUGGESTIONS = [
+  // English classics
+  { title: 'Pride and Prejudice', author: 'Jane Austen', lang: 'en' },
+  { title: 'Frankenstein', author: 'Mary Shelley', lang: 'en' },
+  { title: 'Dracula', author: 'Bram Stoker', lang: 'en' },
+  { title: 'The Great Gatsby', author: 'F. Scott Fitzgerald', lang: 'en' },
+  { title: '1984', author: 'George Orwell', lang: 'en' },
+  { title: 'Moby Dick', author: 'Herman Melville', lang: 'en' },
+  { title: 'Adventures of Huckleberry Finn', author: 'Mark Twain', lang: 'en' },
+  { title: 'War and Peace', author: 'Leo Tolstoy', lang: 'en' },
+  { title: 'Crime and Punishment', author: 'Fyodor Dostoyevsky', lang: 'en' },
+  { title: 'The Adventures of Sherlock Holmes', author: 'Arthur Conan Doyle', lang: 'en' },
+  { title: 'Alice in Wonderland', author: 'Lewis Carroll', lang: 'en' },
+  { title: 'A Tale of Two Cities', author: 'Charles Dickens', lang: 'en' },
+  { title: 'The Picture of Dorian Gray', author: 'Oscar Wilde', lang: 'en' },
+  { title: 'Jane Eyre', author: 'Charlotte Brontë', lang: 'en' },
+  { title: 'Wuthering Heights', author: 'Emily Brontë', lang: 'en' },
+  { title: 'The Count of Monte Cristo', author: 'Alexandre Dumas', lang: 'en' },
+  { title: 'Don Quixote', author: 'Miguel de Cervantes', lang: 'en' },
+  { title: 'Les Misérables', author: 'Victor Hugo', lang: 'en' },
+  { title: 'The Odyssey', author: 'Homer', lang: 'en' },
+  { title: 'Romeo and Juliet', author: 'William Shakespeare', lang: 'en' },
+  { title: 'Hamlet', author: 'William Shakespeare', lang: 'en' },
+  { title: 'The Art of War', author: 'Sun Tzu', lang: 'en' },
+  { title: 'The Republic', author: 'Plato', lang: 'en' },
+  { title: 'Heart of Darkness', author: 'Joseph Conrad', lang: 'en' },
+  { title: 'Little Women', author: 'Louisa May Alcott', lang: 'en' },
+  // Hindi / Indian classics
+  { title: 'गोदान', author: 'मुंशी प्रेमचंद', lang: 'hi' },
+  { title: 'गबन', author: 'मुंशी प्रेमचंद', lang: 'hi' },
+  { title: 'निर्मला', author: 'मुंशी प्रेमचंद', lang: 'hi' },
+  { title: 'रंगभूमि', author: 'मुंशी प्रेमचंद', lang: 'hi' },
+  { title: 'कर्मभूमि', author: 'मुंशी प्रेमचंद', lang: 'hi' },
+  { title: 'सेवासदन', author: 'मुंशी प्रेमचंद', lang: 'hi' },
+  { title: 'रामचरितमानस', author: 'तुलसीदास', lang: 'hi' },
+  { title: 'कामायनी', author: 'जयशंकर प्रसाद', lang: 'hi' },
+  { title: 'मधुशाला', author: 'हरिवंश राय बच्चन', lang: 'hi' },
+  { title: 'चित्रलेखा', author: 'भगवती चरण वर्मा', lang: 'hi' },
+  { title: 'गुनाहों का देवता', author: 'धर्मवीर भारती', lang: 'hi' },
+  { title: 'श्रीमद्भगवद्गीता', author: 'वेदव्यास', lang: 'hi' },
+  { title: 'Premchand Stories', author: 'Munshi Premchand', lang: 'hi' },
+  { title: 'Ramcharitmanas', author: 'Tulsidas', lang: 'hi' },
+  { title: 'Bhagavad Gita', author: 'Vedvyas', lang: 'hi' },
+  { title: 'Mahabharata', author: 'Vedvyas', lang: 'hi' },
+  { title: 'Ramayana', author: 'Valmiki', lang: 'hi' },
+  { title: 'Meghadootam', author: 'Kalidas', lang: 'hi' },
+  { title: 'Panchatantra', author: 'Vishnu Sharma', lang: 'hi' },
+  { title: 'Chanakya Niti', author: 'Chanakya', lang: 'hi' },
+  { title: 'माँ', author: 'मक्सिम गोर्की', lang: 'hi' },
+  // Popular search terms
+  { title: 'Shakespeare', author: '', lang: 'en' },
+  { title: 'Philosophy', author: '', lang: 'en' },
+  { title: 'Poetry', author: '', lang: 'en' },
+  { title: 'Science Fiction', author: '', lang: 'en' },
+  { title: 'हिन्दी साहित्य', author: '', lang: 'hi' },
+  { title: 'Hindi Novels', author: '', lang: 'hi' },
+];
+
+const fuzzyMatch = (text, query) => {
+  const t = text.toLowerCase();
+  const q = query.toLowerCase();
+  if (t.includes(q)) return true;
+  // Check if all query chars exist in order
+  let qi = 0;
+  for (let i = 0; i < t.length && qi < q.length; i++) {
+    if (t[i] === q[qi]) qi++;
+  }
+  return qi === q.length;
+};
+
+const getLocalSuggestions = (query, langFilter = '') => {
+  if (!query || query.length < 2) return [];
+  return CURATED_SUGGESTIONS
+    .filter(s => {
+      if (langFilter && s.lang !== langFilter) return false;
+      return fuzzyMatch(s.title, query) || (s.author && fuzzyMatch(s.author, query));
+    })
+    .slice(0, 5);
+};
+
+// Search cache
+const searchCache = new Map();
+
 function App() {
   const [books, setBooks] = useState([]);
   const [page, setPage] = useState(1);
@@ -156,6 +320,16 @@ function App() {
 
   // Reading streak
   const [streak, setStreak] = useState(0);
+
+  // Language filter: '' = all, 'en' = english, 'hi' = hindi
+  const [langFilter, setLangFilter] = useState('');
+
+  // Smart search: local suggestions
+  const [localSuggestions, setLocalSuggestions] = useState([]);
+  const [searchLangFilter, setSearchLangFilter] = useState(''); // filter inside search overlay
+
+  // IA page tracker (separate from Gutenberg page)
+  const [iaPage, setIaPage] = useState(1);
 
   useEffect(() => {
     if (supabase) {
@@ -234,28 +408,92 @@ function App() {
     setLoading(true);
     
     try {
-      const currentPage = isLoadMore ? page + 1 : 1;
-      let url = `https://gutendex.com/books/?page=${currentPage}`;
-      if (query) url += `&search=${encodeURIComponent(query)}`;
-      if (genre) url += `&topic=${encodeURIComponent(genre)}`;
+      const currentGutPage = isLoadMore ? page + 1 : 1;
+      const currentIAPage = isLoadMore ? iaPage + 1 : 1;
 
-      const res = await fetch(url);
-      const data = await res.json();
-      
-      if (isLoadMore) {
-        setBooks(prev => [...prev, ...data.results]);
-        setPage(currentPage);
-      } else {
-        setBooks(data.results);
-        setPage(1);
+      // Build fetchers based on language filter
+      const fetchers = [];
+
+      // Gutenberg fetch (skip if Hindi-only filter)
+      if (langFilter !== 'hi') {
+        let gutUrl = `https://gutendex.com/books/?page=${currentGutPage}`;
+        if (query) gutUrl += `&search=${encodeURIComponent(query)}`;
+        if (genre) gutUrl += `&topic=${encodeURIComponent(genre)}`;
+        if (langFilter === 'en') gutUrl += `&languages=en`;
+        fetchers.push(
+          fetch(gutUrl).then(r => r.json()).then(data => ({
+            source: 'gutenberg',
+            results: data.results || [],
+            hasMore: !!data.next,
+          })).catch(() => ({ source: 'gutenberg', results: [], hasMore: false }))
+        );
       }
-      setHasMore(!!data.next);
+
+      // Internet Archive fetch (always include for mixed/hindi)
+      if (langFilter !== 'en' || !langFilter) {
+        fetchers.push(
+          fetchIABooks(query || '', currentIAPage, langFilter).then(data => ({
+            source: 'archive',
+            results: data.results || [],
+            hasMore: data.hasMore,
+          })).catch(() => ({ source: 'archive', results: [], hasMore: false }))
+        );
+      }
+
+      const results = await Promise.all(fetchers);
+      
+      // Merge results: interleave Gutenberg and IA books
+      const gutResult = results.find(r => r.source === 'gutenberg');
+      const iaResult = results.find(r => r.source === 'archive');
+      
+      const gutBooks = gutResult?.results || [];
+      const iaBooks = iaResult?.results || [];
+      
+      // Interleave: 3 Gutenberg, 2 IA, repeat (when both have results)
+      let merged = [];
+      let gi = 0, ii = 0;
+      while (gi < gutBooks.length || ii < iaBooks.length) {
+        // Add up to 3 Gutenberg books
+        for (let k = 0; k < 3 && gi < gutBooks.length; k++, gi++) {
+          merged.push(gutBooks[gi]);
+        }
+        // Add up to 2 IA books
+        for (let k = 0; k < 2 && ii < iaBooks.length; k++, ii++) {
+          merged.push(iaBooks[ii]);
+        }
+      }
+
+      // Deduplicate by title similarity
+      const seen = new Set();
+      merged = merged.filter(b => {
+        const key = b.title.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, '').substring(0, 30);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      const anyHasMore = (gutResult?.hasMore ?? false) || (iaResult?.hasMore ?? false);
+
+      if (isLoadMore) {
+        setBooks(prev => {
+          const existingKeys = new Set(prev.map(b => b.id));
+          const newBooks = merged.filter(b => !existingKeys.has(b.id));
+          return [...prev, ...newBooks];
+        });
+        setPage(currentGutPage);
+        setIaPage(currentIAPage);
+      } else {
+        setBooks(merged);
+        setPage(1);
+        setIaPage(1);
+      }
+      setHasMore(anyHasMore);
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
-  }, [loading, hasMore, page, query, genre]);
+  }, [loading, hasMore, page, iaPage, query, genre, langFilter]);
 
   const fetchLibrary = useCallback(async () => {
     setLibraryLoading(true);
@@ -297,9 +535,9 @@ function App() {
   useEffect(() => {
     const delayDebounce = setTimeout(() => {
       fetchBooks(false);
-    }, 500);
+    }, 250);
     return () => clearTimeout(delayDebounce);
-  }, [query, genre]); 
+  }, [query, genre, langFilter]); 
 
   useEffect(() => {
     const handleScroll = () => {
@@ -319,12 +557,19 @@ function App() {
     return () => observer.disconnect();
   }, [loading, hasMore, fetchBooks]);
 
-  // Load trending books on mount
+  // Load trending books on mount (mixed Gutenberg + IA Hindi)
   useEffect(() => {
-    fetch('https://gutendex.com/books/?sort=popular&page=1')
-      .then(r => r.json())
-      .then(data => setTrendingBooks(data.results?.slice(0, 8) || []))
-      .catch(() => {});
+    Promise.all([
+      fetch('https://gutendex.com/books/?sort=popular&page=1')
+        .then(r => r.json())
+        .then(data => (data.results || []).slice(0, 5))
+        .catch(() => []),
+      fetchIABooks('', 1, 'hi')
+        .then(data => (data.results || []).slice(0, 3))
+        .catch(() => []),
+    ]).then(([gutTrending, iaTrending]) => {
+      setTrendingBooks([...gutTrending, ...iaTrending]);
+    });
   }, []);
 
   // Load reading progress map and streak on mount
@@ -346,17 +591,64 @@ function App() {
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
-  // Search overlay handler
-  const handleOverlaySearch = useCallback(async (q) => {
-    if (!q.trim()) { setSearchResults([]); return; }
+  // Search overlay handler with caching + parallel search
+  const handleOverlaySearch = useCallback(async (q, forceLang = null) => {
+    if (!q.trim()) { setSearchResults([]); setLocalSuggestions([]); return; }
+    
+    // Instant local suggestions
+    const activeLang = forceLang !== null ? forceLang : searchLangFilter;
+    setLocalSuggestions(getLocalSuggestions(q, activeLang));
+    
+    // Check cache
+    const cacheKey = `${q.toLowerCase().trim()}|${activeLang}`;
+    if (searchCache.has(cacheKey)) {
+      setSearchResults(searchCache.get(cacheKey));
+      return;
+    }
+
     setSearchLoading(true);
     try {
-      const res = await fetch(`https://gutendex.com/books/?search=${encodeURIComponent(q)}`);
-      const data = await res.json();
-      setSearchResults(data.results?.slice(0, 8) || []);
+      // Parallel search: Gutenberg + Internet Archive
+      const fetchers = [];
+      
+      if (activeLang !== 'hi') {
+        fetchers.push(
+          fetch(`https://gutendex.com/books/?search=${encodeURIComponent(q)}`)
+            .then(r => r.json())
+            .then(data => data.results?.slice(0, 5) || [])
+            .catch(() => [])
+        );
+      }
+      
+      if (activeLang !== 'en') {
+        fetchers.push(
+          fetchIASearch(q).catch(() => [])
+        );
+      }
+
+      const allResults = await Promise.all(fetchers);
+      const merged = allResults.flat();
+      
+      // Deduplicate
+      const seen = new Set();
+      const deduped = merged.filter(b => {
+        const key = b.title.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, '').substring(0, 30);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, 10);
+
+      // Cache results
+      searchCache.set(cacheKey, deduped);
+      if (searchCache.size > 50) {
+        const firstKey = searchCache.keys().next().value;
+        searchCache.delete(firstKey);
+      }
+
+      setSearchResults(deduped);
     } catch { setSearchResults([]); }
     setSearchLoading(false);
-  }, []);
+  }, [searchLangFilter]);
 
   const openBook = (book) => {
     setSelectedBook(book);
@@ -490,18 +782,19 @@ function App() {
             backgroundSize: '60px 60px', zIndex: 1, pointerEvents: 'none'
           }} />
           <div style={{ position: 'absolute', inset: 0, zIndex: 2, pointerEvents: 'none' }}>
-            <div className="display" style={{ position: 'absolute', right: '-5vw', top: '10vh', fontSize: '25vw', opacity: 0.06, color: 'var(--text-muted)', lineHeight: 1 }}>70,000</div>
-            <div className="mono" style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%) rotate(-90deg)', color: 'var(--text-secondary)', transformOrigin: 'left center' }}>EST. 1971 — PROJECT GUTENBERG</div>
+            <div className="display" style={{ position: 'absolute', right: '-5vw', top: '10vh', fontSize: '25vw', opacity: 0.06, color: 'var(--text-muted)', lineHeight: 1 }}>∞</div>
+            <div className="mono" style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%) rotate(-90deg)', color: 'var(--text-secondary)', transformOrigin: 'left center' }}>GUTENBERG + INTERNET ARCHIVE</div>
           </div>
           <div style={{ position: 'relative', zIndex: 3, paddingLeft: '15vw', width: '100%' }}>
             <span className="mono" style={{ color: 'var(--ember)' }}>// THE FREE LIBRARY</span>
             <h1 className="display" style={{ fontSize: 'clamp(3rem, 8vw, 9rem)', lineHeight: 0.95, margin: '20px 0' }}>
-              Seventy<br />
-              <em style={{ marginLeft: '8%' }}>Thousand</em><br />
-              Stories.
+              Every
+              <br />
+              <em style={{ marginLeft: '8%' }}>Story,</em><br />
+              Free.
             </h1>
             <p className="body-text" style={{ fontSize: '18px', color: 'var(--text-secondary)', maxWidth: '400px', marginBottom: '24px' }}>
-              Every great book ever written. Free. Beautiful. Yours.
+              Millions of books from Project Gutenberg & Internet Archive. English, हिन्दी, and more. Free forever.
             </p>
             <div style={{ display: 'flex', gap: '16px', marginBottom: '32px' }}>
               <button className="btn-primary" onClick={() => window.__lenis?.scrollTo(window.innerHeight, { immediate: false }) || window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}>EXPLORE THE CATALOG &rarr;</button>
@@ -602,10 +895,13 @@ function App() {
                 </div>
                 <div style={{ padding: '16px', flex: 1, display: 'flex', flexDirection: 'column' }}>
                   <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                    <span className="lang-badge">{lang}</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span className="lang-badge">{lang}</span>
+                      {book._source === 'archive' && <span className="source-badge ia">IA</span>}
+                    </div>
                     {subjectClean && <span style={{ color: 'var(--text-muted)', fontSize: '9px' }}>{subjectClean.toUpperCase()}</span>}
                   </div>
-                  <h3 className="display" style={{ fontSize: '17px', marginBottom: '4px', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{book.title}</h3>
+                  <h3 className="display" style={{ fontSize: '17px', marginBottom: '4px', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', fontFamily: lang === 'HI' || lang === 'HIN' ? "'Noto Sans Devanagari', 'Playfair Display', serif" : undefined }}>{book.title}</h3>
                   <div className="mono" style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>{authorName.split(',')[0]}</div>
                   <div style={{ height: '1px', background: 'var(--border)', margin: 'auto 0 12px' }}></div>
                   <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -737,7 +1033,7 @@ function App() {
                 className="search-overlay-input"
                 autoFocus
                 type="text"
-                placeholder="Search 70,000 books..."
+                placeholder="Search books in English, Hindi..."
                 value={query}
                 onChange={e => { setQuery(e.target.value); handleOverlaySearch(e.target.value); }}
                 onKeyDown={e => {
@@ -752,9 +1048,38 @@ function App() {
               />
               <span className="search-overlay-hint">ESC</span>
             </div>
+            {/* Language filter tabs in search */}
+            <div className="search-lang-tabs">
+              {[{ key: '', label: 'All' }, { key: 'en', label: 'English' }, { key: 'hi', label: 'हिन्दी' }].map(l => (
+                <button
+                  key={l.key}
+                  className={`search-lang-tab ${searchLangFilter === l.key ? 'active' : ''}`}
+                  onClick={() => { setSearchLangFilter(l.key); handleOverlaySearch(query, l.key); }}
+                >
+                  {l.label}
+                </button>
+              ))}
+            </div>
             <div className="search-overlay-results">
+              {/* Local suggestion chips (instant) */}
+              {localSuggestions.length > 0 && query && (
+                <div className="search-suggestions">
+                  <span className="mono" style={{ fontSize: '9px', color: 'var(--text-muted)', padding: '0 24px' }}>SUGGESTIONS</span>
+                  <div className="suggestion-chips">
+                    {localSuggestions.map((s, i) => (
+                      <button
+                        key={i}
+                        className="suggestion-chip"
+                        onClick={() => { setQuery(s.title); handleOverlaySearch(s.title); }}
+                      >
+                        {s.title}{s.author ? ` — ${s.author}` : ''}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {searchLoading && <div className="search-overlay-empty"><div className="mono text-secondary">SEARCHING...</div></div>}
-              {!searchLoading && searchResults.length === 0 && query && (
+              {!searchLoading && searchResults.length === 0 && query && localSuggestions.length === 0 && (
                 <div className="search-overlay-empty">
                   <div className="mono text-secondary">NO RESULTS FOR "{query.toUpperCase()}"</div>
                 </div>
@@ -769,14 +1094,22 @@ function App() {
                   <img src={book.formats['image/jpeg'] || generateCover(book.title, book.authors?.[0]?.name, book.id)} alt="" />
                   <div className="search-result-info">
                     <div className="search-result-title">{book.title}</div>
-                    <div className="search-result-author">{book.authors?.[0]?.name || 'Unknown'}</div>
+                    <div className="search-result-author">
+                      {book.authors?.[0]?.name || 'Unknown'}
+                      {book._source === 'archive' && <span className="source-badge ia" style={{ marginLeft: '8px' }}>IA</span>}
+                    </div>
                   </div>
                   <ArrowRight size={14} style={{ color: 'var(--text-muted)' }} />
                 </div>
               ))}
               {!query && !searchLoading && (
                 <div className="search-overlay-empty">
-                  <div className="mono text-muted" style={{ fontSize: '11px' }}>TYPE TO SEARCH TITLES, AUTHORS, SUBJECTS...</div>
+                  <div className="mono text-muted" style={{ fontSize: '11px', marginBottom: '16px' }}>POPULAR SEARCHES</div>
+                  <div className="suggestion-chips" style={{ justifyContent: 'center' }}>
+                    {['Pride and Prejudice', 'गोदान', 'Sherlock Holmes', 'रामचरितमानस', 'Shakespeare', 'Premchand'].map(s => (
+                      <button key={s} className="suggestion-chip" onClick={() => { setQuery(s); handleOverlaySearch(s); }}>{s}</button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -799,13 +1132,35 @@ function App() {
       {/* GENRE SCROLL STRIP (visible at catalog section heading) */}
       {view === 'catalog' && (
         <div className="genre-scroll-strip" style={{ padding: '0 5vw', marginTop: '-40px', marginBottom: '20px' }}>
+          {/* Language filter pills */}
+          <button
+            className={`genre-pill lang-pill ${langFilter === '' ? 'active' : ''}`}
+            onClick={() => setLangFilter('')}
+          >
+            <Globe size={11} /> ALL
+          </button>
+          <button
+            className={`genre-pill lang-pill ${langFilter === 'en' ? 'active' : ''}`}
+            onClick={() => setLangFilter('en')}
+          >
+            ENGLISH
+          </button>
+          <button
+            className={`genre-pill lang-pill ${langFilter === 'hi' ? 'active' : ''}`}
+            onClick={() => setLangFilter('hi')}
+            style={{ fontFamily: "'Noto Sans Devanagari', 'JetBrains Mono', monospace" }}
+          >
+            हिन्दी
+          </button>
+          <div style={{ width: '1px', height: '20px', background: 'var(--border)', margin: '0 4px', flexShrink: 0 }} />
+          {/* Genre pills */}
           {['', 'fiction', 'drama', 'poetry', 'philosophy', 'history', 'science', 'adventure'].map(g => (
             <button
               key={g}
               className={`genre-pill ${genre === g ? 'active' : ''}`}
               onClick={() => setGenre(g)}
             >
-              {g ? g.toUpperCase() : 'ALL'}
+              {g ? g.toUpperCase() : 'ALL GENRES'}
             </button>
           ))}
         </div>
@@ -816,10 +1171,10 @@ function App() {
         <div className="footer-grid">
           <div className="footer-brand">
             <h3>Archivum</h3>
-            <p>A beautiful, distraction-free reader for 70,000+ free books from Project Gutenberg.</p>
+            <p>A beautiful, distraction-free reader for millions of free books from Project Gutenberg & Internet Archive.</p>
             <div className="footer-stats">
               <div className="footer-stat">
-                <span className="footer-stat-value">70K+</span>
+                <span className="footer-stat-value">1M+</span>
                 <span className="footer-stat-label">Books</span>
               </div>
               <div className="footer-stat">
@@ -849,13 +1204,13 @@ function App() {
           <div className="footer-col">
             <h4>About</h4>
             <a href="https://gutenberg.org" target="_blank" rel="noreferrer">Project Gutenberg</a>
-            <a href="https://gutenberg.org/help/volunteers/" target="_blank" rel="noreferrer">Volunteer</a>
-            <a href="https://gutenberg.org/donate/" target="_blank" rel="noreferrer">Donate</a>
+              <a href="https://archive.org" target="_blank" rel="noreferrer">Internet Archive</a>
+              <a href="https://gutenberg.org/donate/" target="_blank" rel="noreferrer">Donate</a>
           </div>
         </div>
         <div className="footer-bottom">
           <span>ARCHIVUM © {new Date().getFullYear()}</span>
-          <span>POWERED BY PROJECT GUTENBERG</span>
+          <span>POWERED BY PROJECT GUTENBERG & INTERNET ARCHIVE</span>
         </div>
       </footer>
 
