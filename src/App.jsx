@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NativeReader from './components/NativeReader';
 import { Search, ChevronDown, User, Library, BookOpen, Home, Settings, ArrowRight, Command, CornerDownLeft, X, Globe, Filter, Heart, BarChart3, Clock, Flame, BookMarked } from 'lucide-react';
 import { supabase } from './supabaseClient';
+import { motion, AnimatePresence } from 'framer-motion';
+import Lenis from 'lenis';
 
 // ========== HELPER COMPONENTS ==========
 
@@ -15,6 +17,38 @@ const SkeletonCard = () => (
     </div>
   </div>
 );
+
+const MagneticButton = ({ children, className, onClick, style }) => {
+  const ref = useRef(null);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+
+  const handleMouse = (e) => {
+    const { clientX, clientY } = e;
+    const { height, width, left, top } = ref.current.getBoundingClientRect();
+    const middleX = clientX - (left + width / 2);
+    const middleY = clientY - (top + height / 2);
+    setPosition({ x: middleX * 0.2, y: middleY * 0.2 });
+  };
+
+  const reset = () => {
+    setPosition({ x: 0, y: 0 });
+  };
+
+  return (
+    <motion.button
+      ref={ref}
+      onMouseMove={handleMouse}
+      onMouseLeave={reset}
+      animate={{ x: position.x, y: position.y }}
+      transition={{ type: "spring", stiffness: 150, damping: 15, mass: 0.1 }}
+      className={className}
+      onClick={onClick}
+      style={style}
+    >
+      {children}
+    </motion.button>
+  );
+};
 
 const ProgressRing = ({ percent }) => {
   const r = 14, c = 2 * Math.PI * r;
@@ -111,6 +145,49 @@ const generateCover = (title, author, id) => {
   return canvas.toDataURL();
 };
 
+const DynamicCover = ({ book, style, className }) => {
+  const [coverUrl, setCoverUrl] = useState(() => {
+    if (book._source !== 'archive' && book.formats['image/jpeg']) return book.formats['image/jpeg'];
+    if (book._source === 'archive') {
+      const cached = localStorage.getItem(`cover_${book._iaIdentifier}`);
+      if (cached) return cached;
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    if (coverUrl || book._source !== 'archive') return;
+
+    let isMounted = true;
+    const cacheKey = `cover_${book._iaIdentifier}`;
+    const authorQuery = book.authors?.[0]?.name ? `&author=${encodeURIComponent(book.authors[0].name)}` : '';
+    const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(book.title)}${authorQuery}&fields=cover_i&limit=1`;
+    
+    fetch(url)
+      .then(res => res.json())
+      .then(data => {
+        if (!isMounted) return;
+        const coverI = data?.docs?.[0]?.cover_i;
+        if (coverI) {
+          const finalUrl = `https://covers.openlibrary.org/b/id/${coverI}-L.jpg`;
+          setCoverUrl(finalUrl);
+          localStorage.setItem(cacheKey, finalUrl);
+        } else {
+          // Explicitly mark as not found to fallback to generateCover
+          localStorage.setItem(cacheKey, 'notfound');
+        }
+      })
+      .catch(() => {});
+
+    return () => { isMounted = false; };
+  }, [book, coverUrl]);
+
+  const fallback = generateCover(book.title, book.authors?.[0]?.name || 'Unknown', book.id);
+  const finalSrc = coverUrl && coverUrl !== 'notfound' ? coverUrl : fallback;
+
+  return <img src={finalSrc} alt={book.title} style={style} className={className} loading="lazy" />;
+};
+
 // ========== INTERNET ARCHIVE API ==========
 
 const IA_SEARCH_URL = 'https://archive.org/advancedsearch.php';
@@ -132,7 +209,7 @@ const normalizeIABook = (doc) => {
     title: doc.title || 'Untitled',
     authors: [{ name: authorName }],
     formats: {
-      'image/jpeg': `${IA_COVER_URL}/${identifier}`,
+      'image/jpeg': null,
       'application/epub+zip': null,
       'text/html': null,
       'text/plain': null,
@@ -382,6 +459,29 @@ function App() {
     }
     return { totalDays: uniqueDays.length, totalMinutes, booksStarted, streak: getReadingStreak(), savedCount: savedBooks.length };
   };
+
+  // Setup Lenis Smooth Scroll
+  useEffect(() => {
+    const lenis = new Lenis({
+      duration: 1.2,
+      easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
+      orientation: 'vertical',
+      gestureOrientation: 'vertical',
+      smoothWheel: true,
+    });
+    window.__lenis = lenis;
+
+    function raf(time) {
+      lenis.raf(time);
+      requestAnimationFrame(raf);
+    }
+    requestAnimationFrame(raf);
+
+    return () => {
+      lenis.destroy();
+      window.__lenis = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (supabase) {
@@ -721,7 +821,13 @@ function App() {
     recordReadingDay();
     setStreak(getReadingStreak());
     // Cinematic book-open transition
-    const coverUrl = selectedBook.formats['image/jpeg'] || generateCover(selectedBook.title, selectedBook.authors?.[0]?.name, selectedBook.id);
+    let coverUrl = selectedBook.formats['image/jpeg'];
+    if (!coverUrl && selectedBook._source === 'archive') {
+      const cached = localStorage.getItem(`cover_${selectedBook._iaIdentifier}`);
+      coverUrl = (cached && cached !== 'notfound') ? cached : generateCover(selectedBook.title, selectedBook.authors?.[0]?.name, selectedBook.id);
+    }
+    if (!coverUrl) coverUrl = generateCover(selectedBook.title, selectedBook.authors?.[0]?.name, selectedBook.id);
+    
     setBookOpenAnim(coverUrl);
     setTimeout(() => {
       setBookOpenAnim(null);
@@ -771,87 +877,77 @@ function App() {
 
   return (
     <div id="app" className="visible">
+      <div className="noise-overlay" />
+      <div className="ambient-glow" />
       <div id="cursor-dot" ref={cursorRef}></div>
       
-      {/* NAV */}
-      <header id="nav" className={navVisible ? 'visible' : ''} style={{
-        position: 'fixed', top: 0, left: 0, right: 0, height: '60px',
-        background: 'rgba(6,6,10,0.92)', backdropFilter: 'blur(20px)',
-        borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between',
-        alignItems: 'center', padding: '0 40px', zIndex: 100,
-        transform: navVisible ? 'translateY(0)' : 'translateY(-100%)',
-        transition: 'transform 0.4s ease'
-      }}>
-        <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: '8px', letterSpacing: '0.2em' }}>
-          ARCHIVUM <span style={{ width: 6, height: 6, background: 'var(--ember)', borderRadius: '50%' }}></span>
-        </div>
-        <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
-          <button onClick={() => setShowSearchOverlay(true)} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 20px', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--text-muted)', fontFamily: 'Libre Baskerville, serif', fontSize: '14px', transition: 'border-color 0.2s' }}>
-            <Search size={14} /> Search books... <span className="search-overlay-hint" style={{ marginLeft: '8px' }}>⌘K</span>
-          </button>
-          {streak > 0 && <span className="streak-badge"><span className="streak-fire">🔥</span> {streak} DAY STREAK</span>}
-        </div>
-        <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
-          
-          <div style={{ display: 'flex', gap: '16px', alignItems: 'center', marginRight: '16px' }}>
-            <button className="mono" onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }} style={{ opacity: view === 'catalog' ? 1 : 0.5, borderBottom: view === 'catalog' ? '1px solid var(--gold)' : 'none' }}>CATALOG</button>
-            <button className="mono" onClick={() => setView('library')} style={{ opacity: view === 'library' ? 1 : 0.5, borderBottom: view === 'library' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><Library size={14}/> LIBRARY</button>
-            <button className="mono" onClick={() => setView('saved')} style={{ opacity: view === 'saved' ? 1 : 0.5, borderBottom: view === 'saved' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><Heart size={14}/> SAVED {savedBooks.length > 0 && <span style={{ fontSize: '9px', background: 'var(--ember)', color: '#fff', borderRadius: '10px', padding: '1px 5px', lineHeight: 1.2 }}>{savedBooks.length}</span>}</button>
-            <button className="mono" onClick={() => setView('stats')} style={{ opacity: view === 'stats' ? 1 : 0.5, borderBottom: view === 'stats' ? '1px solid var(--gold)' : 'none', display: 'flex', alignItems: 'center', gap: '6px' }}><BarChart3 size={14}/> STATS</button>
+      {/* FLOATING NAV */}
+      <div className="floating-nav-wrap">
+        <div className={`floating-nav ${navVisible ? 'hidden' : ''}`}>
+          <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: '8px', letterSpacing: '0.2em' }}>
+            ARCHIVUM <span style={{ width: 6, height: 6, background: 'var(--ember)', borderRadius: '50%' }}></span>
           </div>
+          <div style={{ width: '1px', height: '20px', background: 'var(--border)' }} />
+          
+          <button className="mono" onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }} style={{ color: view === 'catalog' ? 'var(--text-primary)' : 'var(--text-muted)', transition: 'color 0.2s' }}>CATALOG</button>
+          <button className="mono" onClick={() => setView('library')} style={{ color: view === 'library' ? 'var(--text-primary)' : 'var(--text-muted)', transition: 'color 0.2s', display: 'flex', alignItems: 'center', gap: '6px' }}><Library size={14}/> LIBRARY</button>
+          <button className="mono" onClick={() => setView('saved')} style={{ color: view === 'saved' ? 'var(--text-primary)' : 'var(--text-muted)', transition: 'color 0.2s', display: 'flex', alignItems: 'center', gap: '6px' }}><Heart size={14}/> SAVED {savedBooks.length > 0 && <span style={{ fontSize: '9px', background: 'var(--ember)', color: '#fff', borderRadius: '10px', padding: '1px 5px', lineHeight: 1.2 }}>{savedBooks.length}</span>}</button>
+          <button className="mono" onClick={() => setView('stats')} style={{ color: view === 'stats' ? 'var(--text-primary)' : 'var(--text-muted)', transition: 'color 0.2s', display: 'flex', alignItems: 'center', gap: '6px' }}><BarChart3 size={14}/> STATS</button>
+          
+          <div style={{ width: '1px', height: '20px', background: 'var(--border)' }} />
 
-
+          <button onClick={() => setShowSearchOverlay(true)} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', transition: 'color 0.2s' }}>
+            <Search size={16} /> <span className="search-overlay-hint">⌘K</span>
+          </button>
+          
           {user ? (
-            <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '11px', color: 'var(--text-secondary)' }}>
-              <span>{user.email}</span>
-              <button onClick={handleLogout} style={{ color: 'var(--text-muted)' }}>LOGOUT</button>
-            </div>
+            <button onClick={handleLogout} className="mono" style={{ color: 'var(--text-muted)' }}>LOGOUT</button>
           ) : (
-            <button className="mono" onClick={() => setShowAuthModal(true)} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: 'var(--text-secondary)' }}>
-              <User size={14} /> SIGN IN TO SAVE PROGRESS
+            <button className="mono" onClick={() => setShowAuthModal(true)} style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)' }}>
+              <User size={14} /> SIGN IN
             </button>
           )}
         </div>
-      </header>
+      </div>
 
       {/* HERO - Only show in catalog view */}
       {view === 'catalog' && (
         <section id="hero" style={{ position: 'relative', height: '100vh', overflow: 'hidden', display: 'flex', alignItems: 'center' }}>
-          <div style={{
-            position: 'absolute', inset: 0,
-            backgroundImage: 'linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)',
-            backgroundSize: '60px 60px', zIndex: 1, pointerEvents: 'none'
-          }} />
-          <div style={{ position: 'absolute', inset: 0, zIndex: 2, pointerEvents: 'none' }}>
-            <div className="display" style={{ position: 'absolute', right: '-5vw', top: '10vh', fontSize: '25vw', opacity: 0.06, color: 'var(--text-muted)', lineHeight: 1 }}>∞</div>
+          <div style={{ position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none' }} />
+          <motion.div style={{ position: 'absolute', inset: 0, zIndex: 2, pointerEvents: 'none' }}>
             <div className="mono" style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%) rotate(-90deg)', color: 'var(--text-secondary)', transformOrigin: 'left center' }}>GUTENBERG + INTERNET ARCHIVE</div>
-          </div>
-          <div style={{ position: 'relative', zIndex: 3, paddingLeft: '15vw', width: '100%' }}>
-            <span className="mono" style={{ color: 'var(--ember)' }}>// THE FREE LIBRARY</span>
-            <h1 className="display" style={{ fontSize: 'clamp(3rem, 8vw, 9rem)', lineHeight: 0.95, margin: '20px 0' }}>
-              Every
-              <br />
-              <em style={{ marginLeft: '8%' }}>Story,</em><br />
-              Free.
-            </h1>
-            <p className="body-text" style={{ fontSize: '18px', color: 'var(--text-secondary)', maxWidth: '400px', marginBottom: '24px' }}>
+          </motion.div>
+          <div style={{ position: 'relative', zIndex: 3, width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            <span className="mono" style={{ color: 'var(--ember)', marginBottom: '20px' }}>// THE FREE LIBRARY</span>
+            <motion.h1 
+              className="hero-title"
+              initial={{ opacity: 0, y: 40 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
+            >
+              ARCHIVUM
+            </motion.h1>
+            <p className="body-text" style={{ fontSize: '18px', color: 'var(--text-secondary)', maxWidth: '400px', margin: '32px 0', textAlign: 'center' }}>
               Millions of books from Project Gutenberg & Internet Archive. English, हिन्दी, and more. Free forever.
             </p>
-            <div style={{ display: 'flex', gap: '16px', marginBottom: '32px' }}>
-              <button className="btn-primary" onClick={() => window.__lenis?.scrollTo(window.innerHeight, { immediate: false }) || window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}>EXPLORE THE CATALOG &rarr;</button>
-              <button className="btn-ghost" onClick={() => setShowSearchOverlay(true)}>SEARCH &nbsp;⌘K</button>
+            <div style={{ display: 'flex', gap: '16px', marginBottom: '40px' }}>
+              <MagneticButton className="btn-primary" onClick={() => window.__lenis?.scrollTo(window.innerHeight, { immediate: false }) || window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}>EXPLORE THE CATALOG &rarr;</MagneticButton>
+              <MagneticButton className="btn-ghost" onClick={() => setShowSearchOverlay(true)}>SEARCH &nbsp;⌘K</MagneticButton>
             </div>
             {/* Trending Strip */}
             {trendingBooks.length > 0 && (
-              <div style={{ maxWidth: '600px' }}>
-                <span className="mono" style={{ color: 'var(--text-muted)', fontSize: '10px' }}>POPULAR RIGHT NOW</span>
-                <div className="trending-strip">
-                  {trendingBooks.map(tb => (
-                    <div key={tb.id} className="trending-item" onClick={(e) => { e.stopPropagation(); openBook(tb); }}>
-                      <img src={tb.formats['image/jpeg'] || generateCover(tb.title, tb.authors?.[0]?.name, tb.id)} alt={tb.title} />
-                      <span>{tb.title.split(':')[0].substring(0, 18)}</span>
-                    </div>
-                  ))}
+              <div style={{ width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <span className="mono" style={{ color: 'var(--text-muted)', fontSize: '10px', marginBottom: '10px' }}>POPULAR RIGHT NOW</span>
+                <div className="marquee-container">
+                  <div className="marquee-content">
+                    {/* Double the list for infinite seamless scrolling */}
+                    {[...trendingBooks, ...trendingBooks].map((tb, idx) => (
+                      <div key={tb.id + '-' + idx} className="trending-item" onClick={(e) => { e.stopPropagation(); openBook(tb); }}>
+                        <DynamicCover book={tb} />
+                        <span>{tb.title.split(':')[0].substring(0, 18)}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             )}
@@ -1014,7 +1110,7 @@ function App() {
                 }}
               >
                 <div className="card-cover-wrap">
-                  <img src={coverUrl} alt="Cover" style={{ width: '100%', aspectRatio: '2/3', objectFit: 'cover', background: 'var(--bg-raised)' }} loading="lazy" />
+                  <DynamicCover book={book} style={{ width: '100%', aspectRatio: '2/3', objectFit: 'cover', background: 'var(--bg-raised)' }} />
                   <button className={`save-btn ${isBookSaved(book.id) ? 'saved' : ''} ${justSavedId === book.id ? 'just-saved' : ''}`} onClick={(e) => toggleSaveBook(book, e)}>
                     <Heart size={14} fill={isBookSaved(book.id) ? 'currentColor' : 'none'} />
                   </button>
@@ -1079,9 +1175,8 @@ function App() {
               <button onClick={closeBook} style={{ position: 'absolute', top: '24px', right: '24px', fontSize: '32px', color: 'var(--text-secondary)' }}>&times;</button>
               
               <div style={{ flex: '0 0 300px', display: 'flex', flexDirection: 'column', gap: '24px', alignItems: 'center' }}>
-                <img 
-                  src={selectedBook.formats['image/jpeg'] || generateCover(selectedBook.title, selectedBook.authors?.[0]?.name, selectedBook.id)} 
-                  alt="Cover" 
+                <DynamicCover 
+                  book={selectedBook}
                   style={{ width: '100%', maxWidth: '280px', aspectRatio: '2/3', objectFit: 'cover', boxShadow: '20px 20px 40px rgba(0,0,0,0.6)', borderRadius: '4px' }} 
                 />
               </div>
@@ -1223,7 +1318,7 @@ function App() {
                   onClick={() => { openBook(book); setShowSearchOverlay(false); }}
                   onMouseEnter={() => setActiveSearchIndex(idx)}
                 >
-                  <img src={book.formats['image/jpeg'] || generateCover(book.title, book.authors?.[0]?.name, book.id)} alt="" />
+                  <DynamicCover book={book} style={{ width: '40px', height: '60px', objectFit: 'cover', borderRadius: '4px', background: 'var(--bg-raised)', flexShrink: 0 }} />
                   <div className="search-result-info">
                     <div className="search-result-title">{book.title}</div>
                     <div className="search-result-author">
