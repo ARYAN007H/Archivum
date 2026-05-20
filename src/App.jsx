@@ -1,9 +1,36 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, Component } from 'react';
 import NativeReader from './components/NativeReader';
 import { Search, ChevronDown, User, Library, BookOpen, Home, Settings, ArrowRight, Command, CornerDownLeft, X, Globe, Filter, Heart, BarChart3, Clock, Flame, BookMarked } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
 import Lenis from 'lenis';
+
+// ========== ERROR BOUNDARY ==========
+
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error('ErrorBoundary caught:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg-base, #0a0a0f)', color: 'var(--text-primary, #EDE8DF)', fontFamily: "'JetBrains Mono', monospace", gap: '16px', padding: '40px', textAlign: 'center' }}>
+          <h2 style={{ fontSize: '24px', margin: 0 }}>Something went wrong</h2>
+          <p style={{ color: 'var(--text-secondary, #8a8a8a)', maxWidth: '400px' }}>{this.state.error?.message || 'An unexpected error occurred.'}</p>
+          <button onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload(); }} style={{ padding: '12px 24px', background: 'var(--ember, #E04E2A)', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}>RELOAD APP</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // ========== HELPER COMPONENTS ==========
 
@@ -112,7 +139,14 @@ const generateCover = (title, author, id) => {
   canvas.width = 200; canvas.height = 300;
   const ctx = canvas.getContext('2d');
   const hues = [210, 340, 160, 25, 280, 50, 190, 310];
-  const hue = hues[(id || 0) % hues.length];
+  // Safely convert id to a numeric index — string IDs (e.g. "ia_xxx") need hashing
+  let numericId = 0;
+  if (typeof id === 'number') {
+    numericId = id;
+  } else if (typeof id === 'string') {
+    for (let i = 0; i < id.length; i++) numericId += id.charCodeAt(i);
+  }
+  const hue = hues[Math.abs(numericId) % hues.length];
 
   const grad = ctx.createLinearGradient(0, 0, 200, 300);
   grad.addColorStop(0, `hsl(${hue}, 35%, 18%)`);
@@ -147,7 +181,7 @@ const generateCover = (title, author, id) => {
 
 const DynamicCover = ({ book, style, className }) => {
   const [coverUrl, setCoverUrl] = useState(() => {
-    if (book._source !== 'archive' && book.formats['image/jpeg']) return book.formats['image/jpeg'];
+    if (book._source !== 'archive' && book.formats?.['image/jpeg']) return book.formats['image/jpeg'];
     if (book._source === 'archive') {
       const cached = localStorage.getItem(`cover_${book._iaIdentifier}`);
       if (cached) return cached;
@@ -243,6 +277,13 @@ const normalizeIABook = (doc) => {
   };
 };
 
+// Helper: fetch with timeout
+const fetchWithTimeout = (url, timeoutMs = 10000) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+};
+
 const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genreFilter = '') => {
   // Filter for actual books: require 'texts' mediatype + book-related collections
   // Exclude known non-book collections (policies, reports, government docs)
@@ -269,7 +310,7 @@ const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genr
   const rows = 20;
   const url = `${IA_SEARCH_URL}?q=${encodeURIComponent(q)}&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=language&fl[]=date&fl[]=subject&fl[]=downloads&sort[]=downloads+desc&rows=${rows}&page=${pageNum}&output=json`;
 
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url, 12000);
   const data = await res.json();
   const docs = data?.response?.docs || [];
   const numFound = data?.response?.numFound || 0;
@@ -427,6 +468,7 @@ function App() {
   const cursorRef = useRef(null);
   const scrollPositionRef = useRef(0);
   const currentFetchId = useRef(0);
+  const loadingRef = useRef(false);
 
   // Search Overlay (Cmd+K)
   const [showSearchOverlay, setShowSearchOverlay] = useState(false);
@@ -501,28 +543,7 @@ function App() {
     return { totalDays: uniqueDays.length, totalMinutes, booksStarted, streak: getReadingStreak(), savedCount: savedBooks.length };
   };
 
-  // Setup Lenis Smooth Scroll
-  useEffect(() => {
-    const lenis = new Lenis({
-      duration: 1.2,
-      easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
-      orientation: 'vertical',
-      gestureOrientation: 'vertical',
-      smoothWheel: true,
-    });
-    window.__lenis = lenis;
-
-    function raf(time) {
-      lenis.raf(time);
-      requestAnimationFrame(raf);
-    }
-    requestAnimationFrame(raf);
-
-    return () => {
-      lenis.destroy();
-      window.__lenis = null;
-    };
-  }, []);
+  // Lenis is initialized in main.jsx — no duplicate instance here
 
   useEffect(() => {
     if (supabase) {
@@ -602,79 +623,109 @@ function App() {
   }, []);
 
   const fetchBooks = useCallback(async (isLoadMore = false) => {
-    if (isLoadMore && loading) return;
+    if (isLoadMore && loadingRef.current) return;
     if (isLoadMore && !hasMore) return;
     
     const fetchId = ++currentFetchId.current;
     
+    loadingRef.current = true;
     setLoading(true);
     
     try {
       const currentGutPage = isLoadMore ? page + 1 : 1;
       const currentIAPage = isLoadMore ? iaPage + 1 : 1;
 
-      // Build fetchers based on language filter
-      const fetchers = [];
+      // Deduplicate helper
+      const dedup = (arr) => {
+        const seen = new Set();
+        return arr.filter(b => {
+          if (!b || !b.title) return false;
+          const key = b.title.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, '').substring(0, 30);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      };
 
-      // Gutenberg fetch (skip if Hindi-only filter)
+      // Staggered fetch: show whichever source responds first
+      let gutPromise = null;
+      let iaPromise = null;
+
+      // Gutenberg fetch (skip if Hindi-only filter) — 10s timeout
       if (langFilter !== 'hi') {
         let gutUrl = `https://gutendex.com/books/?page=${currentGutPage}`;
         if (query) gutUrl += `&search=${encodeURIComponent(query)}`;
         if (genre) gutUrl += `&topic=${encodeURIComponent(genre)}`;
         if (langFilter === 'en') gutUrl += `&languages=en`;
-        fetchers.push(
-          fetch(gutUrl).then(r => r.json()).then(data => ({
-            source: 'gutenberg',
-            results: data.results || [],
-            hasMore: !!data.next,
-          })).catch(() => ({ source: 'gutenberg', results: [], hasMore: false }))
-        );
+        gutPromise = fetchWithTimeout(gutUrl, 10000).then(r => r.json()).then(data => ({
+          source: 'gutenberg',
+          results: (data.results || []).filter(b => b && b.title),
+          hasMore: !!data.next,
+        })).catch(() => ({ source: 'gutenberg', results: [], hasMore: false }));
       }
 
-      // Internet Archive fetch (always include for mixed/hindi)
-      if (langFilter !== 'en' || !langFilter) {
-        fetchers.push(
-          fetchIABooks(query || '', currentIAPage, langFilter, genre).then(data => ({
-            source: 'archive',
-            results: data.results || [],
-            hasMore: data.hasMore,
-          })).catch(() => ({ source: 'archive', results: [], hasMore: false }))
-        );
+      // Internet Archive fetch (always include for mixed/hindi) — 12s timeout
+      if (langFilter !== 'en') {
+        iaPromise = fetchIABooks(query || '', currentIAPage, langFilter, genre).then(data => ({
+          source: 'archive',
+          results: data.results || [],
+          hasMore: data.hasMore,
+        })).catch(() => ({ source: 'archive', results: [], hasMore: false }));
       }
 
-      const results = await Promise.all(fetchers);
-      if (fetchId !== currentFetchId.current) return;
-      
-      // Merge results: interleave Gutenberg and IA books
-      const gutResult = results.find(r => r.source === 'gutenberg');
-      const iaResult = results.find(r => r.source === 'archive');
-      
-      const gutBooks = gutResult?.results || [];
-      const iaBooks = iaResult?.results || [];
-      
-      // Interleave: 3 Gutenberg, 2 IA, repeat (when both have results)
+      // Show fast source immediately, then merge slow source when ready
+      let gutResult = null;
+      let iaResult = null;
+      let earlyBooks = [];
+
+      // If both sources, show the first one that resolves instantly
+      if (gutPromise && iaPromise) {
+        // Race: show whichever resolves first
+        const first = await Promise.race([
+          gutPromise.then(r => { gutResult = r; return r; }),
+          iaPromise.then(r => { iaResult = r; return r; }),
+        ]);
+        if (fetchId !== currentFetchId.current) return;
+
+        // Show early results immediately
+        earlyBooks = dedup(first.results || []);
+        if (isLoadMore) {
+          setBooks(prev => {
+            const existingKeys = new Set(prev.map(b => b.id));
+            return [...prev, ...earlyBooks.filter(b => !existingKeys.has(b.id))];
+          });
+        } else {
+          setBooks(earlyBooks);
+        }
+
+        // Now wait for the slower source (with a secondary timeout)
+        const slowTimeout = new Promise(resolve => setTimeout(() => resolve(null), 8000));
+        if (!gutResult) gutResult = await Promise.race([gutPromise, slowTimeout]) || { source: 'gutenberg', results: [], hasMore: false };
+        if (!iaResult) iaResult = await Promise.race([iaPromise, slowTimeout]) || { source: 'archive', results: [], hasMore: false };
+        if (fetchId !== currentFetchId.current) return;
+      } else {
+        // Only one source
+        if (gutPromise) gutResult = await gutPromise;
+        if (iaPromise) iaResult = await iaPromise;
+        if (fetchId !== currentFetchId.current) return;
+      }
+
+      // Merge and interleave final results
+      const gutBooks = (gutResult?.results || []).filter(b => b && b.title);
+      const iaBooks = (iaResult?.results || []).filter(b => b && b.title);
+
       let merged = [];
       let gi = 0, ii = 0;
       while (gi < gutBooks.length || ii < iaBooks.length) {
-        // Add up to 3 Gutenberg books
         for (let k = 0; k < 3 && gi < gutBooks.length; k++, gi++) {
           merged.push(gutBooks[gi]);
         }
-        // Add up to 2 IA books
         for (let k = 0; k < 2 && ii < iaBooks.length; k++, ii++) {
           merged.push(iaBooks[ii]);
         }
       }
 
-      // Deduplicate by title similarity
-      const seen = new Set();
-      merged = merged.filter(b => {
-        const key = b.title.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, '').substring(0, 30);
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-
+      merged = dedup(merged);
       const anyHasMore = (gutResult?.hasMore ?? false) || (iaResult?.hasMore ?? false);
 
       if (isLoadMore) {
@@ -692,11 +743,12 @@ function App() {
       }
       setHasMore(anyHasMore);
     } catch (e) {
-      console.error(e);
+      console.error('fetchBooks error:', e);
     } finally {
+      loadingRef.current = false;
       setLoading(false);
     }
-  }, [loading, hasMore, page, iaPage, query, genre, langFilter]);
+  }, [hasMore, page, iaPage, query, genre, langFilter]);
 
   const fetchLibrary = useCallback(async () => {
     setLibraryLoading(true);
@@ -735,12 +787,13 @@ function App() {
     if (view === 'library') fetchLibrary();
   }, [view, fetchLibrary]);
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const delayDebounce = setTimeout(() => {
       fetchBooks(false);
     }, 250);
     return () => clearTimeout(delayDebounce);
-  }, [query, genre, langFilter]); 
+  }, [query, genre, langFilter]);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -752,13 +805,13 @@ function App() {
 
   useEffect(() => {
     const observer = new IntersectionObserver(entries => {
-      if (entries[0].isIntersecting && !loading && hasMore) {
+      if (entries[0].isIntersecting && !loadingRef.current && hasMore) {
         fetchBooks(true);
       }
     }, { rootMargin: '400px' });
     if (loaderRef.current) observer.observe(loaderRef.current);
     return () => observer.disconnect();
-  }, [loading, hasMore, fetchBooks]);
+  }, [hasMore, fetchBooks]);
 
   // Load trending books on mount (mixed Gutenberg + IA Hindi)
   useEffect(() => {
@@ -877,7 +930,7 @@ function App() {
     recordReadingDay();
     setStreak(getReadingStreak());
     // Cinematic book-open transition
-    let coverUrl = selectedBook.formats['image/jpeg'];
+    let coverUrl = selectedBook.formats?.['image/jpeg'];
     if (!coverUrl && selectedBook._source === 'archive') {
       const cached = localStorage.getItem(`cover_${selectedBook._iaIdentifier}`);
       coverUrl = (cached && cached !== 'notfound') ? cached : generateCover(selectedBook.title, selectedBook.authors?.[0]?.name, selectedBook.id);
@@ -1581,4 +1634,11 @@ function App() {
   );
 }
 
-export default App;
+// Wrap App in ErrorBoundary for export
+const AppWithErrorBoundary = () => (
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>
+);
+
+export default AppWithErrorBoundary;
