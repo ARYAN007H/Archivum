@@ -58,7 +58,7 @@ const stripGutenbergBoilerplate = (doc) => {
 
 const fetchWithProxy = async (url, responseType = 'text') => {
   const proxies = [
-    (u) => window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? null : `/api/proxy?url=${encodeURIComponent(u)}`,
+    (u) => `/api/proxy?url=${encodeURIComponent(u)}`,
     (u) => u, // try direct first
     (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
@@ -119,6 +119,7 @@ const saveReaderPrefs = (prefs) => {
 const NativeReader = ({ book, onClose, user }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [bookHtml, setBookHtml] = useState('');
   
   const prefs = loadReaderPrefs();
   const [page, setPage] = useState(0);
@@ -133,10 +134,7 @@ const NativeReader = ({ book, onClose, user }) => {
   const [showToc, setShowToc] = useState(false);
   const [tocItems, setTocItems] = useState([]);
   const [currentChapterTitle, setCurrentChapterTitle] = useState('');
-  const [isFlipping, setIsFlipping] = useState(false);
-  const [flipDirection, setFlipDirection] = useState('');
-  const [flipPage, setFlipPage] = useState(0);
-  const [flipHtml, setFlipHtml] = useState('');
+
   
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -161,8 +159,6 @@ const NativeReader = ({ book, onClose, user }) => {
   const touchEndX = useRef(0);
 
   const contentRef = useRef(null);
-  const htmlToInject = useRef('');
-  const highlightsToRestore = useRef([]);
   const [totalPages, setTotalPages] = useState(1);
   const [isRecalculating, setIsRecalculating] = useState(false);
 
@@ -171,6 +167,14 @@ const NativeReader = ({ book, onClose, user }) => {
   // Storage logic
   const [highlights, setHighlights] = useState([]);
   const [bookmarks, setBookmarks] = useState([]);
+
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Persist reader prefs whenever they change
   useEffect(() => {
@@ -213,8 +217,6 @@ const NativeReader = ({ book, onClose, user }) => {
 
   // Fetch initial data
   useEffect(() => {
-    let isMounted = true;
-    
     const loadSavedData = async () => {
       let savedPage = 0;
       let savedHighlights = [];
@@ -233,7 +235,7 @@ const NativeReader = ({ book, onClose, user }) => {
         try { savedHighlights = JSON.parse(localStorage.getItem(`archivum_highlights_${book.id}`)) || []; } catch(e){}
         try { savedBookmarks = JSON.parse(localStorage.getItem(`archivum_bookmarks_${book.id}`)) || []; } catch(e){}
       }
-      if (isMounted) {
+      if (isMountedRef.current) {
         setPage(savedPage);
         setHighlights(savedHighlights);
         setBookmarks(savedBookmarks);
@@ -252,142 +254,29 @@ const NativeReader = ({ book, onClose, user }) => {
           return;
         } catch (err) {
           console.error('IA load error:', err);
-          if (isMounted) {
-            setError('Unable to load this book from Internet Archive. The book may only be available as scanned PDF.');
+          if (isMountedRef.current) {
+            setError('Unable to load this book from Internet Archive.');
             setLoading(false);
           }
           return;
         }
       }
 
-      const epubUrl = book.formats['application/epub+zip'];
-      if (!epubUrl) {
-        await loadHtmlTier(savedHighlights);
-        return;
-      }
-
-      try {
-        const arrayBuffer = await fetchWithProxy(epubUrl, 'arraybuffer');
-
-        const JSZip = window.JSZip;
-        if (!JSZip) throw new Error("JSZip not loaded");
-        const zip = await JSZip.loadAsync(arrayBuffer);
-
-        // Parse container.xml
-        const containerFile = zip.file("META-INF/container.xml");
-        if (!containerFile) throw new Error("No container.xml");
-        const containerXml = await containerFile.async("string");
-        const parser = new DOMParser();
-        const containerDoc = parser.parseFromString(containerXml, "application/xml");
-        const rootfile = Array.from(containerDoc.getElementsByTagName("*")).find(el => el.localName === "rootfile");
-        const opfPath = rootfile.getAttribute("full-path");
-
-        const opfBaseDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
-        const resolveOpfPath = (href) => opfBaseDir + href;
-
-        const opfFile = zip.file(opfPath);
-        if (!opfFile) throw new Error("OPF not found");
-        const opfXml = await opfFile.async("string");
-        const opfDoc = parser.parseFromString(opfXml, "application/xml");
-
-        // Parse manifest and spine
-        const manifest = {};
-        const items = Array.from(opfDoc.getElementsByTagName("*")).filter(el => el.localName === "item");
-        for (let i = 0; i < items.length; i++) {
-          manifest[items[i].getAttribute("id")] = items[i].getAttribute("href");
-        }
-
-        const itemrefs = Array.from(opfDoc.getElementsByTagName("*")).filter(el => el.localName === "itemref");
-        const spineIds = itemrefs.map(itemref => itemref.getAttribute("idref"));
-
-        let finalHtml = '';
-        for (const id of spineIds) {
-          const href = manifest[id];
-          if (!href) continue;
-          const fullPath = resolveOpfPath(decodeURIComponent(href));
-          const chapterFile = zip.file(fullPath);
-          if (!chapterFile) continue;
-
-          const chapterHtml = await chapterFile.async("string");
-          const chapterDoc = parser.parseFromString(chapterHtml, "text/html");
-
-          chapterDoc.querySelectorAll("style, link, script").forEach(el => el.remove());
-          
-          stripGutenbergBoilerplate(chapterDoc);
-
-          const chapterBaseDir = fullPath.includes('/') ? fullPath.substring(0, fullPath.lastIndexOf('/') + 1) : '';
-          const resolveChapterPath = (src) => {
-            if (src.startsWith('http') || src.startsWith('data:')) return src;
-            const parts = chapterBaseDir.split('/').filter(Boolean);
-            const srcParts = decodeURIComponent(src).split('/');
-            for (const p of srcParts) {
-              if (p === '..') parts.pop();
-              else if (p !== '.') parts.push(p);
-            }
-            return parts.join('/');
-          };
-
-          const imgs = chapterDoc.querySelectorAll("img");
-          for (const img of Array.from(imgs)) {
-            const src = img.getAttribute("src");
-            if (src) {
-              const imgPath = resolveChapterPath(src);
-              const imgFile = zip.file(imgPath);
-              if (imgFile) {
-                const base64 = await imgFile.async("base64");
-                const ext = imgPath.split('.').pop().toLowerCase();
-                const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'svg' ? 'image/svg+xml' : 'image/jpeg';
-                img.setAttribute("src", `data:${mime};base64,${base64}`);
-              }
-            }
-            img.removeAttribute("class");
-            img.removeAttribute("style");
-          }
-
-          // Strip inline styles/classes but keep semantic tags
-          chapterDoc.body.querySelectorAll("*").forEach(el => {
-            const safeStyles = [];
-            if (el.style.textAlign) safeStyles.push(`text-align: ${el.style.textAlign}`);
-            if (el.style.fontStyle) safeStyles.push(`font-style: ${el.style.fontStyle}`);
-            if (el.style.fontWeight) safeStyles.push(`font-weight: ${el.style.fontWeight}`);
-            
-            el.removeAttribute("style");
-            if (safeStyles.length > 0) {
-              el.setAttribute("style", safeStyles.join('; '));
-            }
-          });
-
-          finalHtml += `<div class="chapter-break"></div>${chapterDoc.body.innerHTML}`;
-        }
-
-        if (isMounted) {
-          htmlToInject.current = finalHtml;
-          highlightsToRestore.current = savedHighlights;
-          setLoading(false);
-        }
-
-      } catch (err) {
-        console.error("EPUB Parse Error:", err);
-        if (isMounted) await loadHtmlTier(savedHighlights);
-      }
+      await loadHtmlTier(savedHighlights);
     };
 
     loadBook();
     const existingTime = parseInt(localStorage.getItem(`archivum_time_${book.id}`) || '0', 10);
     setSessionTime(existingTime);
-
-    return () => { isMounted = false; };
   }, [book, user]);
 
   // ========== Internet Archive book loader ==========
   const loadIABook = async (identifier, savedHighlights) => {
     // Fetch metadata to find downloadable files
-    const metaRes = await fetch(`https://archive.org/metadata/${identifier}/files`);
-    const metaData = await metaRes.json();
+    const metaText = await fetchWithProxy(`https://archive.org/metadata/${identifier}/files`);
+    const metaData = JSON.parse(metaText);
     const files = metaData?.result || [];
 
-    // Find EPUB file
-    let epubFile = files.find(f => f.name?.toLowerCase().endsWith('.epub'));
     // Find text file
     let textFile = files.find(f => {
       const name = f.name?.toLowerCase() || '';
@@ -401,83 +290,23 @@ const NativeReader = ({ book, onClose, user }) => {
 
     const baseUrl = `https://archive.org/download/${identifier}`;
 
-    if (epubFile) {
-      try {
-        const epubUrl = `${baseUrl}/${encodeURIComponent(epubFile.name)}`;
-        const arrayBuffer = await fetch(epubUrl).then(r => {
-          if (!r.ok) throw new Error('EPUB fetch failed');
-          return r.arrayBuffer();
-        });
+    // Fallback: try HTML
+    if (htmlFile) {
+      const htmlUrl = `${baseUrl}/${encodeURIComponent(htmlFile.name)}`;
+      const htmlText = await fetchWithProxy(htmlUrl);
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlText, 'text/html');
+      doc.querySelectorAll('style, link, script, meta, title').forEach(el => el.remove());
 
-        const JSZip = window.JSZip;
-        if (!JSZip) throw new Error('JSZip not loaded');
-        const zip = await JSZip.loadAsync(arrayBuffer);
-
-        // Parse container.xml
-        const containerFile = zip.file('META-INF/container.xml');
-        if (!containerFile) throw new Error('No container.xml');
-        const containerXml = await containerFile.async('string');
-        const parser = new DOMParser();
-        const containerDoc = parser.parseFromString(containerXml, 'application/xml');
-        const rootfile = Array.from(containerDoc.getElementsByTagName('*')).find(el => el.localName === 'rootfile');
-        const opfPath = rootfile.getAttribute('full-path');
-
-        const opfBaseDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
-        const resolveOpfPath = (href) => opfBaseDir + href;
-
-        const opfFile = zip.file(opfPath);
-        if (!opfFile) throw new Error('OPF not found');
-        const opfXml = await opfFile.async('string');
-        const opfDoc = parser.parseFromString(opfXml, 'application/xml');
-
-        const manifest = {};
-        const items = Array.from(opfDoc.getElementsByTagName('*')).filter(el => el.localName === 'item');
-        for (const item of items) {
-          manifest[item.getAttribute('id')] = item.getAttribute('href');
-        }
-
-        const itemrefs = Array.from(opfDoc.getElementsByTagName('*')).filter(el => el.localName === 'itemref');
-        const spineIds = itemrefs.map(itemref => itemref.getAttribute('idref'));
-
-        let finalHtml = '';
-        for (const id of spineIds) {
-          const href = manifest[id];
-          if (!href) continue;
-          const fullPath = resolveOpfPath(decodeURIComponent(href));
-          const chapterFile = zip.file(fullPath);
-          if (!chapterFile) continue;
-
-          const chapterHtml = await chapterFile.async('string');
-          const chapterDoc = parser.parseFromString(chapterHtml, 'text/html');
-          chapterDoc.querySelectorAll('style, link, script').forEach(el => el.remove());
-
-          // Skip Gutenberg boilerplate stripping for IA books
-
-          chapterDoc.body.querySelectorAll('*').forEach(el => {
-            const safeStyles = [];
-            if (el.style.textAlign) safeStyles.push(`text-align: ${el.style.textAlign}`);
-            if (el.style.fontStyle) safeStyles.push(`font-style: ${el.style.fontStyle}`);
-            if (el.style.fontWeight) safeStyles.push(`font-weight: ${el.style.fontWeight}`);
-            el.removeAttribute('style');
-            if (safeStyles.length > 0) el.setAttribute('style', safeStyles.join('; '));
-          });
-
-          finalHtml += `<div class="chapter-break"></div>${chapterDoc.body.innerHTML}`;
-        }
-
-        htmlToInject.current = finalHtml;
-        highlightsToRestore.current = savedHighlights;
-        setLoading(false);
-        return;
-      } catch (epubErr) {
-        console.warn('IA EPUB parse failed, trying text:', epubErr);
-      }
+      setBookHtml(doc.body.innerHTML);
+      setLoading(false);
+      return;
     }
 
     // Fallback: try text file
     if (textFile) {
       const textUrl = `${baseUrl}/${encodeURIComponent(textFile.name)}`;
-      const text = await fetch(textUrl).then(r => r.text());
+      const text = await fetchWithProxy(textUrl);
 
       const lines = text.split('\n');
       let fullHtml = '';
@@ -506,22 +335,7 @@ const NativeReader = ({ book, onClose, user }) => {
       }
       if (currentParagraph.trim()) fullHtml += `<p>${currentParagraph.trim()}</p>`;
 
-      htmlToInject.current = fullHtml;
-      highlightsToRestore.current = savedHighlights || [];
-      setLoading(false);
-      return;
-    }
-
-    // Fallback: try HTML
-    if (htmlFile) {
-      const htmlUrl = `${baseUrl}/${encodeURIComponent(htmlFile.name)}`;
-      const htmlText = await fetch(htmlUrl).then(r => r.text());
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(htmlText, 'text/html');
-      doc.querySelectorAll('style, link, script, meta, title').forEach(el => el.remove());
-
-      htmlToInject.current = doc.body.innerHTML;
-      highlightsToRestore.current = savedHighlights || [];
+      setBookHtml(fullHtml);
       setLoading(false);
       return;
     }
@@ -532,20 +346,30 @@ const NativeReader = ({ book, onClose, user }) => {
   // Tier 2: Fetch HTML version from Gutenberg
   const loadHtmlTier = async (savedHighlights) => {
     try {
-      const htmlUrl = book.formats['text/html'] || book.formats['text/html; charset=utf-8'];
+      const htmlUrl = book.formats['text/html'] 
+        || book.formats['text/html; charset=utf-8']
+        || book.formats['text/html; charset=us-ascii'];
+      
       if (!htmlUrl) {
-        await loadPlainTextFallback(savedHighlights);
-        return;
+        throw new Error("No HTML format available for this book.");
       }
       
       const htmlText = await fetchWithProxy(htmlUrl, 'text');
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(htmlText, "text/html");
-      
-      doc.querySelectorAll("style, link, script, meta, title, header, footer").forEach(el => el.remove());
-      
-      stripGutenbergBoilerplate(doc);
+      const doc = new DOMParser().parseFromString(htmlText, 'text/html');
 
+      // Line 1: Remove the entire header boilerplate
+      doc.getElementById('pg-header')?.remove();
+
+      // Line 2: Remove the entire footer boilerplate  
+      doc.getElementById('pg-footer')?.remove();
+
+      // Line 3: Remove all inline CSS from Gutenberg
+      doc.querySelectorAll('style').forEach(el => el.remove());
+      doc.querySelectorAll('[style]').forEach(el => el.removeAttribute('style'));
+      doc.querySelectorAll('[class]').forEach(el => el.removeAttribute('class'));
+
+      // Gutenberg HTML images are absolute URLs to their CDN.
+      // We resolve relative paths to absolute URLs relative to htmlUrl.
       const imgs = doc.querySelectorAll("img");
       for (const img of Array.from(imgs)) {
         const src = img.getAttribute("src");
@@ -555,29 +379,15 @@ const NativeReader = ({ book, onClose, user }) => {
              img.setAttribute("src", absoluteUrl);
            } catch(e) {}
         }
-        img.removeAttribute("class");
-        img.removeAttribute("style");
       }
-      
-      doc.body.querySelectorAll("*").forEach(el => {
-        const safeStyles = [];
-        if (el.style.textAlign) safeStyles.push(`text-align: ${el.style.textAlign}`);
-        if (el.style.fontStyle) safeStyles.push(`font-style: ${el.style.fontStyle}`);
-        if (el.style.fontWeight) safeStyles.push(`font-weight: ${el.style.fontWeight}`);
-        
-        el.removeAttribute("style");
-        if (safeStyles.length > 0) {
-          el.setAttribute("style", safeStyles.join('; '));
-        }
-        // Keep classes so structural CSS rules (like .chapter) can be applied if needed.
-      });
-      
-      htmlToInject.current = doc.body.innerHTML;
-      highlightsToRestore.current = savedHighlights || [];
-      setLoading(false);
-      
+
+      if (isMountedRef.current) {
+        setBookHtml(doc.body.innerHTML);
+        setLoading(false);
+      }
     } catch (err) {
       console.error("HTML fetch error:", err);
+      // Fallback: try plain text fallback
       await loadPlainTextFallback(savedHighlights);
     }
   };
@@ -673,8 +483,7 @@ const NativeReader = ({ book, onClose, user }) => {
       const doc = parser.parseFromString(`<body>${fullHtml}</body>`, "text/html");
       stripGutenbergBoilerplate(doc);
 
-      htmlToInject.current = doc.body.innerHTML;
-      highlightsToRestore.current = savedHighlights || [];
+      setBookHtml(doc.body.innerHTML);
       setLoading(false);
     } catch(e) {
       console.error("Fallback error:", e);
@@ -683,21 +492,54 @@ const NativeReader = ({ book, onClose, user }) => {
     }
   };
 
+  const calculatePages = useCallback(() => {
+    if (contentRef.current) {
+      const scrollWidth = contentRef.current.scrollWidth;
+      const viewWidth = window.innerWidth;
+      const pages = Math.max(1, Math.ceil(scrollWidth / viewWidth));
+      setTotalPages(pages);
+      setPage(p => Math.min(Math.max(p, 0), pages - 1));
+    }
+    setIsRecalculating(false);
+  }, []);
+
+  const goToPage = (targetPage) => {
+    setPage(targetPage);
+    saveData(targetPage, undefined, undefined);
+  };
+
   useEffect(() => {
-    if (!loading && contentRef.current && htmlToInject.current) {
-      contentRef.current.innerHTML = htmlToInject.current;
-      
+    if (bookHtml && contentRef.current) {
       const injectedImgs = contentRef.current.querySelectorAll('img');
       injectedImgs.forEach(img => {
         img.onerror = () => { img.style.display = 'none'; };
         img.style.maxWidth = '100%';
-        img.style.maxHeight = '40vh';
+        img.style.maxHeight = '35vh';
         img.style.height = 'auto';
         img.style.display = 'block';
-        img.style.margin = '1rem auto';
+        img.style.margin = '1.5rem auto';
       });
 
-      restoreHighlights(contentRef.current, highlightsToRestore.current);
+      // APPLY OUR TYPOGRAPHY OVER GUTENBERG'S STRIPPED HTML
+      contentRef.current.style.fontFamily = 'Libre Baskerville, Georgia, serif';
+      contentRef.current.style.fontSize   = '17px';
+      contentRef.current.style.lineHeight = '1.85';
+      contentRef.current.style.color      = '#E8DFD0';
+
+      // TOC NAVIGATION — intercept all internal anchor clicks
+      const handleAnchorClick = (e) => {
+        const anchor = e.target.closest('a[href^="#"]');
+        if (!anchor) return;
+        e.preventDefault();
+        const id = anchor.getAttribute('href').slice(1);
+        const target = contentRef.current.querySelector(`#${id}, [id="${id}"]`);
+        if (!target) return;
+        const pageNum = Math.floor(target.offsetLeft / window.innerWidth);
+        goToPage(pageNum);
+      };
+      contentRef.current.addEventListener('click', handleAnchorClick);
+
+      restoreHighlights(contentRef.current, highlights);
       
       // Extract TOC
       const headings = contentRef.current.querySelectorAll('.chapter-heading, h1, h2, h3');
@@ -717,12 +559,14 @@ const NativeReader = ({ book, onClose, user }) => {
         setIsRecalculating(true);
         setTimeout(calculatePages, 200);
       });
-      
-      // Clear refs to prevent re-injecting on other re-renders
-      htmlToInject.current = '';
-      highlightsToRestore.current = [];
+
+      return () => {
+        if (contentRef.current) {
+          contentRef.current.removeEventListener('click', handleAnchorClick);
+        }
+      };
     }
-  }, [loading]);
+  }, [bookHtml, highlights, calculatePages]);
 
   const restoreHighlights = (container, savedHighlights) => {
     if (!savedHighlights || savedHighlights.length === 0) return;
@@ -789,16 +633,7 @@ const NativeReader = ({ book, onClose, user }) => {
     }
   };
 
-  const calculatePages = useCallback(() => {
-    if (contentRef.current) {
-      const scrollWidth = contentRef.current.scrollWidth;
-      const viewWidth = window.innerWidth;
-      const pages = Math.max(1, Math.ceil(scrollWidth / viewWidth));
-      setTotalPages(pages);
-      setPage(p => Math.min(Math.max(p, 0), pages - 1));
-    }
-    setIsRecalculating(false);
-  }, []);
+
 
   // Recalculate pages when font size or spread mode changes
   useEffect(() => {
@@ -841,46 +676,20 @@ const NativeReader = ({ book, onClose, user }) => {
   }, [loading, page, spread]);
 
   const next = useCallback(() => {
-    if (isFlipping) return;
     setPage(p => {
       const newPage = Math.min(totalPages - 1, p + 1);
-      if (newPage !== p) {
-        if (contentRef.current) {
-          setFlipHtml(contentRef.current.innerHTML);
-        }
-        setFlipPage(p);
-        setFlipDirection('next');
-        setIsFlipping(true);
-        setTimeout(() => {
-          setIsFlipping(false);
-          setFlipDirection('');
-        }, 550);
-      }
       saveData(newPage, undefined, undefined);
       return newPage;
     });
-  }, [totalPages, isFlipping]);
+  }, [totalPages]);
 
   const prev = useCallback(() => {
-    if (isFlipping) return;
     setPage(p => {
       const newPage = Math.max(0, p - 1);
-      if (newPage !== p) {
-        if (contentRef.current) {
-          setFlipHtml(contentRef.current.innerHTML);
-        }
-        setFlipPage(p);
-        setFlipDirection('prev');
-        setIsFlipping(true);
-        setTimeout(() => {
-          setIsFlipping(false);
-          setFlipDirection('');
-        }, 550);
-      }
       saveData(newPage, undefined, undefined);
       return newPage;
     });
-  }, [isFlipping]);
+  }, []);
 
   useEffect(() => {
     const handleKey = (e) => {
@@ -1320,6 +1129,18 @@ const NativeReader = ({ book, onClose, user }) => {
           opacity: 0 !important;
           transition: opacity 0.2s ease !important;
         }
+        .reader-content p          { margin: 0 0 0.6em 0; text-indent: 1.5em; }
+        .reader-content h1,
+        .reader-content h2,
+        .reader-content h3   { font-family: 'Playfair Display', serif;
+                              color: #BF9B5A; text-align: center;
+                              margin: 2.5rem 0 1.5rem; text-indent: 0; }
+        .reader-content blockquote { font-style: italic; margin: 1rem 2rem;
+                                      opacity: 0.85; }
+        .reader-content hr         { border: none; border-top: 1px solid rgba(255,255,255,0.1);
+                                      margin: 2rem auto; width: 40%; }
+        .reader-content a          { color: #BF9B5A; text-decoration: none; }
+        .reader-content table      { margin: 1rem auto; }
       `}</style>
       <div 
         ref={readerCursorRef}
@@ -1873,11 +1694,9 @@ const NativeReader = ({ book, onClose, user }) => {
             className="page-slider"
             style={{
               transform: `translateX(-${page * 100}vw)`,
-              transition: isFlipping ? 'none' : 'transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+              transition: 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)',
               width: 'max-content',
               height: '100%',
-              opacity: isFlipping ? 0 : 1,
-              pointerEvents: isFlipping ? 'none' : 'auto'
             }}
           >
             <div 
@@ -1902,196 +1721,9 @@ const NativeReader = ({ book, onClose, user }) => {
                 overflow: 'hidden',
                 wordBreak: 'break-word',
               }}
-            >
-            </div>
+              dangerouslySetInnerHTML={{ __html: bookHtml }}
+            />
           </div>
-
-          {/* 3D Page Flip Overlay */}
-          {isFlipping && (
-            <div 
-              className="book-flip-overlay"
-              style={{
-                backgroundColor: currentTheme.bg,
-                color: currentTheme.color,
-              }}
-            >
-              {effectiveSpread ? (
-                <>
-                  {/* Static Left Page (Fixed) */}
-                  <div className="book-page">
-                    <div 
-                      className="book-page-content"
-                      style={{
-                        columnWidth: colWidthCalc,
-                        columnCount: numCols,
-                        columnGap: `${gap}px`,
-                        paddingLeft: `${pad}px`,
-                        paddingRight: `${pad}px`,
-                        fontSize: `${fontSize}px`,
-                        lineHeight: lineHeight,
-                        color: currentTheme.color,
-                        fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
-                          ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
-                          : activeFontFamily,
-                        transform: `translateX(-${(flipDirection === 'next' ? flipPage : page) * 100}vw)`,
-                        left: 0
-                      }}
-                      dangerouslySetInnerHTML={{ __html: flipHtml }}
-                    />
-                  </div>
-
-                  {/* Static Right Page (Fixed) */}
-                  <div className="book-page">
-                    <div 
-                      className="book-page-content"
-                      style={{
-                        columnWidth: colWidthCalc,
-                        columnCount: numCols,
-                        columnGap: `${gap}px`,
-                        paddingLeft: `${pad}px`,
-                        paddingRight: `${pad}px`,
-                        fontSize: `${fontSize}px`,
-                        lineHeight: lineHeight,
-                        color: currentTheme.color,
-                        fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
-                          ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
-                          : activeFontFamily,
-                        transform: `translateX(-${(flipDirection === 'next' ? page : flipPage) * 100}vw)`,
-                        left: '-50vw'
-                      }}
-                      dangerouslySetInnerHTML={{ __html: flipHtml }}
-                    />
-                  </div>
-
-                  {/* Flipping Page */}
-                  <div className={`flipping-page-wrapper ${flipDirection === 'next' ? 'flip-next' : 'flip-prev'}`}>
-                    <div className="flipping-page-flipper">
-                      {/* Front Face */}
-                      <div className="flipping-page-face face-front">
-                        <div 
-                          className="book-page-content"
-                          style={{
-                            columnWidth: colWidthCalc,
-                            columnCount: numCols,
-                            columnGap: `${gap}px`,
-                            paddingLeft: `${pad}px`,
-                            paddingRight: `${pad}px`,
-                            fontSize: `${fontSize}px`,
-                            lineHeight: lineHeight,
-                            color: currentTheme.color,
-                            fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
-                              ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
-                              : activeFontFamily,
-                            transform: `translateX(-${flipPage * 100}vw)`,
-                            left: flipDirection === 'next' ? '-50vw' : '0'
-                          }}
-                          dangerouslySetInnerHTML={{ __html: flipHtml }}
-                        />
-                      </div>
-                      {/* Back Face */}
-                      <div className="flipping-page-face face-back">
-                        <div 
-                          className="book-page-content"
-                          style={{
-                            columnWidth: colWidthCalc,
-                            columnCount: numCols,
-                            columnGap: `${gap}px`,
-                            paddingLeft: `${pad}px`,
-                            paddingRight: `${pad}px`,
-                            fontSize: `${fontSize}px`,
-                            lineHeight: lineHeight,
-                            color: currentTheme.color,
-                            fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
-                              ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
-                              : activeFontFamily,
-                            transform: `translateX(-${page * 100}vw)`,
-                            left: flipDirection === 'next' ? '0' : '-50vw'
-                          }}
-                          dangerouslySetInnerHTML={{ __html: flipHtml }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="spread-spine" />
-                </>
-              ) : (
-                <>
-                  {/* Static Underneath Page */}
-                  <div className="book-page single">
-                    <div 
-                      className="book-page-content"
-                      style={{
-                        columnWidth: colWidthCalc,
-                        columnCount: numCols,
-                        columnGap: `${gap}px`,
-                        paddingLeft: `${pad}px`,
-                        paddingRight: `${pad}px`,
-                        fontSize: `${fontSize}px`,
-                        lineHeight: lineHeight,
-                        color: currentTheme.color,
-                        fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
-                          ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
-                          : activeFontFamily,
-                        transform: `translateX(-${page * 100}vw)`,
-                        left: 0
-                      }}
-                      dangerouslySetInnerHTML={{ __html: flipHtml }}
-                    />
-                  </div>
-
-                  {/* Flipping Page */}
-                  <div className={`flipping-page-wrapper single ${flipDirection === 'next' ? 'flip-next' : 'flip-prev'}`}>
-                    <div className="flipping-page-flipper">
-                      {/* Front Face */}
-                      <div className="flipping-page-face face-front">
-                        <div 
-                          className="book-page-content"
-                          style={{
-                            columnWidth: colWidthCalc,
-                            columnCount: numCols,
-                            columnGap: `${gap}px`,
-                            paddingLeft: `${pad}px`,
-                            paddingRight: `${pad}px`,
-                            fontSize: `${fontSize}px`,
-                            lineHeight: lineHeight,
-                            color: currentTheme.color,
-                            fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
-                              ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
-                              : activeFontFamily,
-                            transform: `translateX(-${flipPage * 100}vw)`,
-                            left: 0
-                          }}
-                          dangerouslySetInnerHTML={{ __html: flipHtml }}
-                        />
-                      </div>
-                      {/* Back Face */}
-                      <div className="flipping-page-face face-back">
-                        <div 
-                          className="book-page-content"
-                          style={{
-                            columnWidth: colWidthCalc,
-                            columnCount: numCols,
-                            columnGap: `${gap}px`,
-                            paddingLeft: `${pad}px`,
-                            paddingRight: `${pad}px`,
-                            fontSize: `${fontSize}px`,
-                            lineHeight: lineHeight,
-                            color: currentTheme.color,
-                            fontFamily: (book.languages?.[0] || '').match(/^(hi|hin|hindi)$/i)
-                              ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
-                              : activeFontFamily,
-                            transform: `translateX(-${page * 100}vw)`,
-                            left: 0
-                          }}
-                          dangerouslySetInnerHTML={{ __html: flipHtml }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
         </div>
 
         {/* Left turn zone */}

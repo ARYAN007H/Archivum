@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import re
@@ -93,3 +93,24 @@ def get_book(book_id: str):
     
     chapters = parse_gutenberg_text(text)
     return {"id": book_id, "chapters": chapters}
+
+@app.get("/api/proxy")
+def proxy(url: str = Query(..., description="The URL to proxy")):
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+        }
+        resp = requests.get(url, headers=headers, timeout=15)
+        content_type = resp.headers.get('content-type', 'application/octet-stream')
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers={
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                'Content-Type': content_type
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+

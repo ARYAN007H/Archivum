@@ -1776,7 +1776,7 @@ button {
   text-indent: 1.5em;
   orphans: 2;
   widows: 2;
-  break-inside: avoid-column;
+  break-inside: auto;
 }
 
 /* First paragraph after heading: no indent, drop-cap style */
