@@ -1562,7 +1562,6 @@ button {
   -webkit-hyphens: auto;
   font-feature-settings: "liga" 1, "kern" 1, "onum" 1;
   hanging-punctuation: first last;
-  will-change: transform, opacity, filter;
 }
 
 .reader-content * {
@@ -1583,7 +1582,7 @@ button {
 /* 3D BOOK PAGE TURN        */
 /* ======================== */
 .page-slider {
-  transform-style: preserve-3d;
+  /* flat compositing — 3D page turn was removed */
 }
 
 /* 3D Flipping Layout Overlay */
@@ -1874,9 +1873,7 @@ button {
   text-align: left;
 }
 
-.reader-content .chapter-break,
-.reader-content h2,
-.reader-content .chapter-heading {
+.reader-content .chapter-break {
   break-before: column;
   -webkit-column-break-before: always;
 }
@@ -2728,3 +2725,47 @@ button {
   background: var(--text-muted);
   border-radius: 4px;
 }
+
+/* Pulsing Ember Dot Loader */
+.chapter-loading-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease-in-out;
+}
+
+.chapter-loading-overlay.active {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.pulsing-ember-dot {
+  width: 24px;
+  height: 24px;
+  background-color: var(--ember, #E25A38);
+  border-radius: 50%;
+  box-shadow: 0 0 20px var(--ember, #E25A38);
+  animation: pulse-dot 1s infinite ease-in-out;
+}
+
+@keyframes pulse-dot {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 1;
+    box-shadow: 0 0 30px var(--ember, #E25A38);
+  }
+  100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+}
+

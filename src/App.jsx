@@ -284,6 +284,33 @@ const fetchWithTimeout = (url, timeoutMs = 10000) => {
   return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
 };
 
+const fetchWithProxy = async (url, responseType = 'json') => {
+  const proxyMakers = [
+    () => `/api/proxy?url=${encodeURIComponent(url)}`,
+    () => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    () => url
+  ];
+
+  for (const makeUrl of proxyMakers) {
+    try {
+      const proxyUrl = makeUrl();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      const res = await fetch(proxyUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) continue;
+      if (responseType === 'json') {
+        const text = await res.text();
+        return JSON.parse(text);
+      }
+      return await res.text();
+    } catch (e) {
+      continue;
+    }
+  }
+  throw new Error(`All proxies failed for: ${url}`);
+};
+
 const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genreFilter = '') => {
   // Filter for actual books: require 'texts' mediatype + book-related collections
   // Exclude known non-book collections (policies, reports, government docs)
@@ -310,8 +337,7 @@ const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genr
   const rows = 20;
   const url = `${IA_SEARCH_URL}?q=${encodeURIComponent(q)}&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=language&fl[]=date&fl[]=subject&fl[]=downloads&sort[]=downloads+desc&rows=${rows}&page=${pageNum}&output=json`;
 
-  const res = await fetchWithTimeout(url, 12000);
-  const data = await res.json();
+  const data = await fetchWithProxy(url, 'json');
   const docs = data?.response?.docs || [];
   const numFound = data?.response?.numFound || 0;
   
@@ -332,8 +358,7 @@ const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genr
 const fetchIASearch = async (query) => {
   if (!query.trim()) return [];
   const url = `${IA_SEARCH_URL}?q=mediatype:texts+AND+(title:(${encodeURIComponent(query)})+OR+creator:(${encodeURIComponent(query)}))&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=language&fl[]=downloads&sort[]=downloads+desc&rows=6&page=1&output=json`;
-  const res = await fetch(url);
-  const data = await res.json();
+  const data = await fetchWithProxy(url, 'json');
   return (data?.response?.docs || []).map(normalizeIABook);
 };
 

@@ -57,17 +57,15 @@ const stripGutenbergBoilerplate = (doc) => {
 };
 
 const fetchWithProxy = async (url, responseType = 'text') => {
-  const proxies = [
-    (u) => `/api/proxy?url=${encodeURIComponent(u)}`,
-    (u) => u, // try direct first
-    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-    (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-    (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-  ].filter(Boolean);
-  
-  for (const makeUrl of proxies) {
+  const proxyMakers = [
+    () => `/api/proxy?url=${encodeURIComponent(url)}`,
+    () => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    () => url
+  ];
+
+  for (const makeUrl of proxyMakers) {
     try {
-      const proxyUrl = makeUrl(url);
+      const proxyUrl = makeUrl();
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
       const res = await fetch(proxyUrl, { signal: controller.signal });
@@ -81,6 +79,7 @@ const fetchWithProxy = async (url, responseType = 'text') => {
   }
   throw new Error(`All proxies failed for: ${url}`);
 };
+
 
 // Font family options
 const FONT_OPTIONS = [
@@ -116,10 +115,133 @@ const saveReaderPrefs = (prefs) => {
   try { localStorage.setItem('archivum_reader_prefs', JSON.stringify(prefs)); } catch {}
 };
 
+const copyAnchorIdsToHeadings = (doc) => {
+  const anchors = doc.querySelectorAll('a[id]');
+  anchors.forEach(anchor => {
+    if (!anchor.textContent.trim()) {
+      const id = anchor.getAttribute('id');
+      let next = anchor.nextSibling;
+      let count = 0;
+      while (next && count < 10) {
+        if (next.nodeType === 1) { // Node.ELEMENT_NODE
+          if (/^(H1|H2|H3)$/i.test(next.tagName)) {
+            if (!next.hasAttribute('id')) {
+              next.setAttribute('id', id);
+            }
+            break;
+          }
+          if (/^(P|DIV|TABLE|UL|OL)$/i.test(next.tagName)) {
+            break;
+          }
+        }
+        next = next.nextSibling;
+        count++;
+      }
+    }
+  });
+};
+
+const splitIntoChapters = (doc) => {
+  copyAnchorIdsToHeadings(doc);
+
+  // Ensure all h1, h2, h3 have IDs (if they don't, generate one)
+  const allHeadings = Array.from(doc.querySelectorAll('h1, h2, h3'));
+  allHeadings.forEach((h, index) => {
+    if (!h.getAttribute('id')) {
+      h.setAttribute('id', `ch-${index}`);
+    }
+  });
+
+  const chapters = [];
+  const headings = Array.from(doc.querySelectorAll('h1[id], h2[id], h3[id]'));
+
+  if (headings.length === 0) {
+    chapters.push({
+      id: 'book-content',
+      title: 'Book Content',
+      html: doc.body.innerHTML
+    });
+    return chapters;
+  }
+
+  // First segment: from start of body to first heading (if there is content)
+  const firstHeading = headings[0];
+  const preRange = doc.createRange();
+  if (doc.body.firstChild) {
+    try {
+      preRange.setStartBefore(doc.body.firstChild);
+      preRange.setEndBefore(firstHeading);
+      const clone = preRange.cloneContents();
+      if (clone.textContent.trim().length > 0 || clone.querySelector('img')) {
+        const div = doc.createElement('div');
+        div.appendChild(clone);
+        chapters.push({
+          id: 'title',
+          title: 'Title Page',
+          html: div.innerHTML
+        });
+      }
+    } catch (e) {
+      console.warn("Pre-content split warning:", e);
+    }
+  }
+
+  // Loop through headings and create chapters
+  for (let i = 0; i < headings.length; i++) {
+    const currentHeading = headings[i];
+    const nextHeading = headings[i + 1];
+    
+    const range = doc.createRange();
+    try {
+      range.setStartBefore(currentHeading);
+      
+      if (nextHeading) {
+        range.setEndBefore(nextHeading);
+      } else {
+        if (doc.body.lastChild) {
+          range.setEndAfter(doc.body.lastChild);
+        } else {
+          range.setEndAfter(doc.body);
+        }
+      }
+
+      const clone = range.cloneContents();
+      const div = doc.createElement('div');
+      div.appendChild(clone);
+      
+      let title = currentHeading.getAttribute('data-title') || currentHeading.textContent.trim();
+      if (!title) {
+        title = `Chapter ${i + 1}`;
+      } else if (title.length > 80) {
+        title = title.substring(0, 77) + '...';
+      }
+
+      chapters.push({
+        id: currentHeading.getAttribute('id'),
+        title: title,
+        html: div.innerHTML
+      });
+    } catch (e) {
+      console.error("Chapter split error:", e);
+    }
+  }
+
+  return chapters;
+};
+
 const NativeReader = ({ book, onClose, user }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [bookHtml, setBookHtml] = useState('');
+  
+  const [chapters, setChapters] = useState([]);
+  const [currentChapterIndex, setCurrentChapterIndex] = useState(0);
+  const [chapterLoading, setChapterLoading] = useState(false);
+
+  const pendingChapterRef = useRef(0);
+  const pendingPageRef = useRef(0);
+  const pendingAnchorIdRef = useRef(null);
+  const pendingHighlightTextRef = useRef(null);
   
   const prefs = loadReaderPrefs();
   const [page, setPage] = useState(0);
@@ -213,7 +335,30 @@ const NativeReader = ({ book, onClose, user }) => {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [page, totalPages, isSpeaking]);
+  }, [next, prev, isSpeaking, handleTTS]);
+
+  const processAndSetBook = (rawHtmlOrDoc, savedHighlights) => {
+    let doc;
+    if (typeof rawHtmlOrDoc === 'string') {
+      const parser = new DOMParser();
+      doc = parser.parseFromString(`<body>${rawHtmlOrDoc}</body>`, 'text/html');
+    } else {
+      doc = rawHtmlOrDoc;
+    }
+    
+    // Split into chapters
+    const splitChaps = splitIntoChapters(doc);
+    if (isMountedRef.current) {
+      setChapters(splitChaps);
+      
+      // Determine initial chapter index
+      const startChapter = pendingChapterRef.current;
+      const safeChapter = Math.min(Math.max(startChapter, 0), Math.max(0, splitChaps.length - 1));
+      setCurrentChapterIndex(safeChapter);
+      
+      setLoading(false);
+    }
+  };
 
   // Fetch initial data
   useEffect(() => {
@@ -235,8 +380,22 @@ const NativeReader = ({ book, onClose, user }) => {
         try { savedHighlights = JSON.parse(localStorage.getItem(`archivum_highlights_${book.id}`)) || []; } catch(e){}
         try { savedBookmarks = JSON.parse(localStorage.getItem(`archivum_bookmarks_${book.id}`)) || []; } catch(e){}
       }
+
+      let decodedChapter = 0;
+      let decodedPage = 0;
+      if (savedPage >= 10000) {
+        decodedChapter = Math.floor(savedPage / 10000);
+        decodedPage = savedPage % 10000;
+      } else {
+        decodedPage = savedPage;
+      }
+
+      pendingChapterRef.current = decodedChapter;
+      pendingPageRef.current = decodedPage;
+
       if (isMountedRef.current) {
-        setPage(savedPage);
+        setPage(decodedPage);
+        setCurrentChapterIndex(decodedChapter);
         setHighlights(savedHighlights);
         setBookmarks(savedBookmarks);
       }
@@ -298,8 +457,7 @@ const NativeReader = ({ book, onClose, user }) => {
       const doc = parser.parseFromString(htmlText, 'text/html');
       doc.querySelectorAll('style, link, script, meta, title').forEach(el => el.remove());
 
-      setBookHtml(doc.body.innerHTML);
-      setLoading(false);
+      processAndSetBook(doc, savedHighlights);
       return;
     }
 
@@ -335,8 +493,7 @@ const NativeReader = ({ book, onClose, user }) => {
       }
       if (currentParagraph.trim()) fullHtml += `<p>${currentParagraph.trim()}</p>`;
 
-      setBookHtml(fullHtml);
-      setLoading(false);
+      processAndSetBook(fullHtml, savedHighlights);
       return;
     }
 
@@ -381,10 +538,7 @@ const NativeReader = ({ book, onClose, user }) => {
         }
       }
 
-      if (isMountedRef.current) {
-        setBookHtml(doc.body.innerHTML);
-        setLoading(false);
-      }
+      processAndSetBook(doc, savedHighlights);
     } catch (err) {
       console.error("HTML fetch error:", err);
       // Fallback: try plain text fallback
@@ -483,8 +637,7 @@ const NativeReader = ({ book, onClose, user }) => {
       const doc = parser.parseFromString(`<body>${fullHtml}</body>`, "text/html");
       stripGutenbergBoilerplate(doc);
 
-      setBookHtml(doc.body.innerHTML);
-      setLoading(false);
+      processAndSetBook(doc, savedHighlights);
     } catch(e) {
       console.error("Fallback error:", e);
       setError("Unable to load this book. Please try another title.");
@@ -492,21 +645,137 @@ const NativeReader = ({ book, onClose, user }) => {
     }
   };
 
+  const saveDataRef = useRef();
+
+  useEffect(() => {
+    saveDataRef.current = (newPage, newHighlights, newBookmarks) => {
+      const resolvedPage = newPage !== undefined ? newPage : page;
+      const resolvedHighlights = newHighlights !== undefined ? newHighlights : highlights;
+      const resolvedBookmarks = newBookmarks !== undefined ? newBookmarks : bookmarks;
+      
+      const msRead = Date.now() - sessionStartTime.current;
+      const mins = Math.floor(msRead / 60000);
+      if (mins > 0) {
+        const key = `archivum_time_${book.id}`;
+        const total = parseInt(localStorage.getItem(key) || '0', 10) + mins;
+        localStorage.setItem(key, total.toString());
+        sessionStartTime.current = Date.now();
+        setSessionTime(total);
+      }
+
+      const compositeProgress = currentChapterIndex * 10000 + resolvedPage;
+
+      if (user && supabase) {
+        supabase.from('reading_progress').upsert({
+          user_id: user.id,
+          book_id: book.id,
+          book_title: book.title,
+          current_page: compositeProgress,
+          highlights: resolvedHighlights,
+          bookmarks: resolvedBookmarks,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id,book_id' }).catch(e => console.error('Save error:', e));
+      } else {
+        localStorage.setItem(`archivum_progress_${book.id}`, compositeProgress.toString());
+        localStorage.setItem(`archivum_highlights_${book.id}`, JSON.stringify(resolvedHighlights));
+        localStorage.setItem(`archivum_bookmarks_${book.id}`, JSON.stringify(resolvedBookmarks));
+      }
+    };
+  });
+
+  const saveData = useCallback((newPage, newHighlights, newBookmarks) => {
+    if (saveDataRef.current) {
+      saveDataRef.current(newPage, newHighlights, newBookmarks);
+    }
+  }, []);
+
   const calculatePages = useCallback(() => {
     if (contentRef.current) {
-      const scrollWidth = contentRef.current.scrollWidth;
-      const viewWidth = window.innerWidth;
-      const pages = Math.max(1, Math.ceil(scrollWidth / viewWidth));
-      setTotalPages(pages);
-      setPage(p => Math.min(Math.max(p, 0), pages - 1));
+      requestAnimationFrame(() => {
+        if (!contentRef.current) return;
+        const scrollWidth = contentRef.current.scrollWidth;
+        const viewWidth = window.innerWidth;
+        const pages = Math.max(1, Math.ceil(scrollWidth / viewWidth));
+        setTotalPages(pages);
+        
+        let targetPage = 0;
+        if (pendingPageRef.current === 'last') {
+          targetPage = pages - 1;
+        } else if (typeof pendingPageRef.current === 'number') {
+          targetPage = Math.min(Math.max(pendingPageRef.current, 0), pages - 1);
+        }
+        
+        if (pendingAnchorIdRef.current) {
+          const id = pendingAnchorIdRef.current;
+          const target = contentRef.current.querySelector(`#${CSS.escape(id)}, [id="${id}"]`);
+          if (target) {
+            targetPage = Math.floor(target.offsetLeft / viewWidth);
+          }
+          pendingAnchorIdRef.current = null;
+        }
+
+        if (pendingHighlightTextRef.current) {
+          const text = pendingHighlightTextRef.current;
+          const marks = Array.from(contentRef.current.querySelectorAll('mark'));
+          const match = marks.find(m => m.textContent.includes(text));
+          if (match) {
+            targetPage = Math.floor(match.offsetLeft / viewWidth);
+          } else {
+            const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            while ((node = walker.nextNode())) {
+              if (node.nodeValue.includes(text)) {
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                const rects = range.getClientRects();
+                if (rects.length > 0) {
+                  targetPage = Math.floor((rects[0].left + (page * viewWidth)) / viewWidth);
+                }
+                break;
+              }
+            }
+          }
+          pendingHighlightTextRef.current = null;
+        }
+        
+        setPage(targetPage);
+        pendingPageRef.current = 0; // reset
+        setIsRecalculating(false);
+        setChapterLoading(false);
+        
+        if (saveDataRef.current) {
+          saveDataRef.current(targetPage, undefined, undefined);
+        }
+      });
+    } else {
+      setIsRecalculating(false);
+      setChapterLoading(false);
     }
-    setIsRecalculating(false);
-  }, []);
+  }, [currentChapterIndex]);
 
   const goToPage = (targetPage) => {
     setPage(targetPage);
-    saveData(targetPage, undefined, undefined);
+    if (saveDataRef.current) {
+      saveDataRef.current(targetPage, undefined, undefined);
+    }
   };
+
+  useEffect(() => {
+    if (chapters.length === 0) return;
+    const chap = chapters[currentChapterIndex];
+    if (!chap) return;
+
+    setChapterLoading(true);
+    setCurrentChapterTitle(chap.title);
+
+    const timer = setTimeout(() => {
+      if (isMountedRef.current) {
+        setBookHtml(chap.html);
+      }
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [currentChapterIndex, chapters]);
 
   useEffect(() => {
     if (bookHtml && contentRef.current) {
@@ -520,41 +789,45 @@ const NativeReader = ({ book, onClose, user }) => {
         img.style.margin = '1.5rem auto';
       });
 
-      // APPLY OUR TYPOGRAPHY OVER GUTENBERG'S STRIPPED HTML
+      // APPLY OUR TYPOGRAPHY OVER STRIPPED HTML
       contentRef.current.style.fontFamily = 'Libre Baskerville, Georgia, serif';
       contentRef.current.style.fontSize   = '17px';
       contentRef.current.style.lineHeight = '1.85';
-      contentRef.current.style.color      = '#E8DFD0';
 
-      // TOC NAVIGATION — intercept all internal anchor clicks
       const handleAnchorClick = (e) => {
         const anchor = e.target.closest('a[href^="#"]');
         if (!anchor) return;
         e.preventDefault();
         const id = anchor.getAttribute('href').slice(1);
-        const target = contentRef.current.querySelector(`#${id}, [id="${id}"]`);
-        if (!target) return;
-        const pageNum = Math.floor(target.offsetLeft / window.innerWidth);
-        goToPage(pageNum);
+        
+        let foundChapterIndex = -1;
+        const escapedId = id.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        const regex = new RegExp(`id=["']${escapedId}["']`, 'i');
+        
+        for (let i = 0; i < chapters.length; i++) {
+          if (regex.test(chapters[i].html)) {
+            foundChapterIndex = i;
+            break;
+          }
+        }
+        
+        if (foundChapterIndex !== -1) {
+          if (foundChapterIndex === currentChapterIndex) {
+            const target = contentRef.current.querySelector(`#${CSS.escape(id)}, [id="${id}"]`);
+            if (target) {
+              const pageNum = Math.floor(target.offsetLeft / window.innerWidth);
+              goToPage(pageNum);
+            }
+          } else {
+            pendingAnchorIdRef.current = id;
+            setCurrentChapterIndex(foundChapterIndex);
+          }
+        }
       };
       contentRef.current.addEventListener('click', handleAnchorClick);
 
-      restoreHighlights(contentRef.current, highlights);
-      
-      // Extract TOC
-      const headings = contentRef.current.querySelectorAll('.chapter-heading, h1, h2, h3');
-      const items = Array.from(headings).map((h, i) => {
-        if (!h.id) h.id = `toc-${i}`;
-        return {
-          id: h.id,
-          title: h.getAttribute('data-title') || h.textContent,
-          level: parseInt(h.tagName.substring(1)),
-          element: h
-        };
-      }).filter(item => item.title.trim().length > 0);
-      setTocItems(items);
-      
-      // Give the browser time to lay out columns before measuring
+      restoreHighlights(contentRef.current, highlights, currentChapterIndex);
+
       requestAnimationFrame(() => {
         setIsRecalculating(true);
         setTimeout(calculatePages, 200);
@@ -566,12 +839,17 @@ const NativeReader = ({ book, onClose, user }) => {
         }
       };
     }
-  }, [bookHtml, highlights, calculatePages]);
+  }, [bookHtml, highlights, currentChapterIndex, calculatePages]);
 
-  const restoreHighlights = (container, savedHighlights) => {
+  const restoreHighlights = (container, savedHighlights, chapterIdx) => {
     if (!savedHighlights || savedHighlights.length === 0) return;
     
-    savedHighlights.forEach(hl => {
+    const chapterHighlights = savedHighlights.filter(hl => {
+      const hlChap = hl.chapterIndex !== undefined ? hl.chapterIndex : 0;
+      return hlChap === chapterIdx;
+    });
+
+    chapterHighlights.forEach(hl => {
       let occurrenceCount = 0;
       const hlText = hl.text;
       const targetIndex = hl.index;
@@ -602,40 +880,6 @@ const NativeReader = ({ book, onClose, user }) => {
     });
   };
 
-  const saveData = async (newPage, newHighlights, newBookmarks) => {
-    // Save reading time
-    const msRead = Date.now() - sessionStartTime.current;
-    const mins = Math.floor(msRead / 60000);
-    if (mins > 0) {
-      const key = `archivum_time_${book.id}`;
-      const total = parseInt(localStorage.getItem(key) || '0', 10) + mins;
-      localStorage.setItem(key, total.toString());
-      sessionStartTime.current = Date.now();
-      setSessionTime(total);
-    }
-
-    if (user && supabase) {
-      try {
-        await supabase.from('reading_progress').upsert({
-          user_id: user.id,
-          book_id: book.id,
-          book_title: book.title,
-          current_page: newPage ?? page,
-          highlights: newHighlights ?? highlights,
-          bookmarks: newBookmarks ?? bookmarks,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'user_id,book_id' });
-      } catch(e) { console.error('Save error:', e); }
-    } else {
-      if (newPage !== undefined) localStorage.setItem(`archivum_progress_${book.id}`, newPage);
-      if (newHighlights !== undefined) localStorage.setItem(`archivum_highlights_${book.id}`, JSON.stringify(newHighlights));
-      if (newBookmarks !== undefined) localStorage.setItem(`archivum_bookmarks_${book.id}`, JSON.stringify(newBookmarks));
-    }
-  };
-
-
-
-  // Recalculate pages when font size or spread mode changes
   useEffect(() => {
     if (!loading) {
       setIsRecalculating(true);
@@ -658,48 +902,45 @@ const NativeReader = ({ book, onClose, user }) => {
     };
   }, [calculatePages]);
 
-  useEffect(() => {
-    if (loading) return;
-    const headings = contentRef.current?.querySelectorAll('.chapter-heading, h1, h2, h3');
-    if (!headings) return;
-    const observer = new IntersectionObserver(entries => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          const title = entry.target.getAttribute('data-title') || entry.target.textContent;
-          setCurrentChapterTitle(title);
-        }
-      });
-    }, { root: null, rootMargin: '0px', threshold: 0.1 });
-
-    headings.forEach(h => observer.observe(h));
-    return () => observer.disconnect();
-  }, [loading, page, spread]);
-
   const next = useCallback(() => {
-    setPage(p => {
-      const newPage = Math.min(totalPages - 1, p + 1);
-      saveData(newPage, undefined, undefined);
-      return newPage;
-    });
-  }, [totalPages]);
+    if (page < totalPages - 1) {
+      const newPage = page + 1;
+      setPage(newPage);
+      if (saveDataRef.current) {
+        saveDataRef.current(newPage, undefined, undefined);
+      }
+    } else {
+      if (currentChapterIndex < chapters.length - 1) {
+        pendingPageRef.current = 0;
+        setCurrentChapterIndex(idx => idx + 1);
+      } else {
+        alert("You've reached the end of the book.");
+      }
+    }
+  }, [page, totalPages, currentChapterIndex, chapters.length]);
 
   const prev = useCallback(() => {
-    setPage(p => {
-      const newPage = Math.max(0, p - 1);
-      saveData(newPage, undefined, undefined);
-      return newPage;
-    });
-  }, []);
+    if (page > 0) {
+      const newPage = page - 1;
+      setPage(newPage);
+      if (saveDataRef.current) {
+        saveDataRef.current(newPage, undefined, undefined);
+      }
+    } else {
+      if (currentChapterIndex > 0) {
+        pendingPageRef.current = 'last';
+        setCurrentChapterIndex(idx => idx - 1);
+      }
+    }
+  }, [page, currentChapterIndex]);
 
   useEffect(() => {
     const handleKey = (e) => {
-      if(e.key === 'ArrowRight') next();
-      if(e.key === 'ArrowLeft') prev();
       if(e.key === 'Escape') onClose();
     };
     window.addEventListener('keyup', handleKey);
     return () => window.removeEventListener('keyup', handleKey);
-  }, [next, prev, onClose]);
+  }, [onClose]);
 
   const getThemeVars = () => {
     switch (theme) {
@@ -804,7 +1045,12 @@ const NativeReader = ({ book, onClose, user }) => {
       pos = range.startContainer.nodeValue.indexOf(text, pos + 1);
     }
 
-    const hlObj = { text, index: occurrenceIndex, bookId: book.id };
+    const hlObj = { 
+      text, 
+      index: occurrenceIndex, 
+      bookId: book.id,
+      chapterIndex: currentChapterIndex
+    };
     const newHighlights = [...highlights, hlObj];
     setHighlights(newHighlights);
     
@@ -844,7 +1090,12 @@ const NativeReader = ({ book, onClose, user }) => {
     if (!selectionMenu) return;
     const { text } = selectionMenu;
     const excerpt = text.substring(0, 40) + (text.length > 40 ? '...' : '');
-    const bmObj = { page, excerpt, time: new Date().toISOString() };
+    const bmObj = { 
+      chapterIndex: currentChapterIndex,
+      page, 
+      excerpt, 
+      time: new Date().toISOString() 
+    };
     const newBookmarks = [...bookmarks, bmObj];
     setBookmarks(newBookmarks);
     window.getSelection().removeAllRanges();
@@ -932,7 +1183,7 @@ const NativeReader = ({ book, onClose, user }) => {
     setCurrentSearchIndex(-1);
   };
 
-  const getVisibleText = () => {
+  const getVisibleText = useCallback(() => {
     if (!contentRef.current) return '';
     const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT, null, false);
     let node;
@@ -954,9 +1205,9 @@ const NativeReader = ({ book, onClose, user }) => {
       }
     }
     return text.replace(/\s+/g, ' ').trim();
-  };
+  }, [page]);
 
-  const readCurrentPage = () => {
+  const readCurrentPage = useCallback(() => {
     const synth = window.speechSynthesis;
     if (!synth) return;
     synth.cancel();
@@ -977,9 +1228,9 @@ const NativeReader = ({ book, onClose, user }) => {
     synth.speak(utterance);
     setIsSpeaking(true);
     setIsPaused(false);
-  };
+  }, [ttsRate, ttsVoice, getVisibleText]);
 
-  const handleTTS = () => {
+  const handleTTS = useCallback(() => {
     const synth = window.speechSynthesis;
     if (!synth) return;
     
@@ -995,15 +1246,15 @@ const NativeReader = ({ book, onClose, user }) => {
     }
     
     readCurrentPage();
-  };
+  }, [isSpeaking, isPaused, readCurrentPage]);
 
-  const stopTTS = () => {
+  const stopTTS = useCallback(() => {
     const synth = window.speechSynthesis;
     if (!synth) return;
     synth.cancel();
     setIsSpeaking(false);
     setIsPaused(false);
-  };
+  }, []);
 
   // Delete a highlight
   const deleteHighlight = (idx) => {
@@ -1125,22 +1376,6 @@ const NativeReader = ({ book, onClose, user }) => {
         .native-reader-root, .native-reader-root * {
           cursor: none !important;
         }
-        .recalculating {
-          opacity: 0 !important;
-          transition: opacity 0.2s ease !important;
-        }
-        .reader-content p          { margin: 0 0 0.6em 0; text-indent: 1.5em; }
-        .reader-content h1,
-        .reader-content h2,
-        .reader-content h3   { font-family: 'Playfair Display', serif;
-                              color: #BF9B5A; text-align: center;
-                              margin: 2.5rem 0 1.5rem; text-indent: 0; }
-        .reader-content blockquote { font-style: italic; margin: 1rem 2rem;
-                                      opacity: 0.85; }
-        .reader-content hr         { border: none; border-top: 1px solid rgba(255,255,255,0.1);
-                                      margin: 2rem auto; width: 40%; }
-        .reader-content a          { color: #BF9B5A; text-decoration: none; }
-        .reader-content table      { margin: 1rem auto; }
       `}</style>
       <div 
         ref={readerCursorRef}
@@ -1503,27 +1738,33 @@ const NativeReader = ({ book, onClose, user }) => {
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
           {/* TOC Tab */}
           {sidebarTab === 'toc' && (
-            tocItems.length === 0 ? (
-              <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO HEADINGS FOUND</div>
+            chapters.length === 0 ? (
+              <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO CHAPTERS FOUND</div>
             ) : (
-              tocItems.map((item, idx) => (
+              chapters.map((chap, idx) => (
                 <div 
                   key={idx} 
-                  onClick={() => navigateToTocItem(item)}
+                  onClick={() => {
+                    pendingPageRef.current = 0;
+                    setCurrentChapterIndex(idx);
+                    setShowToc(false);
+                  }}
                   style={{ 
-                    padding: `12px 24px 12px ${24 + (item.level - 1) * 16}px`,
+                    padding: `12px 24px 12px 24px`,
                     cursor: 'pointer',
                     fontSize: '14px',
                     fontFamily: "'Libre Baskerville', serif",
                     lineHeight: 1.4,
-                    opacity: 0.8,
+                    opacity: currentChapterIndex === idx ? 1 : 0.8,
+                    background: currentChapterIndex === idx ? `${currentTheme.accent}12` : 'transparent',
+                    color: currentChapterIndex === idx ? currentTheme.accent : 'inherit',
                     transition: 'background 0.2s, opacity 0.2s',
                     borderBottom: `1px solid ${currentTheme.muted}30`
                   }}
                   onMouseEnter={e => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = currentTheme.muted; }}
-                  onMouseLeave={e => { e.currentTarget.style.opacity = 0.8; e.currentTarget.style.background = 'transparent'; }}
+                  onMouseLeave={e => { e.currentTarget.style.opacity = currentChapterIndex === idx ? 1 : 0.8; e.currentTarget.style.background = currentChapterIndex === idx ? `${currentTheme.accent}12` : 'transparent'; }}
                 >
-                  {item.title}
+                  {chap.title}
                 </div>
               ))
             )
@@ -1534,30 +1775,46 @@ const NativeReader = ({ book, onClose, user }) => {
             highlights.length === 0 ? (
               <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO HIGHLIGHTS YET<br/><span style={{ opacity: 0.6, fontSize: '9px' }}>Select text and tap HIGHLIGHT to add one.</span></div>
             ) : (
-              highlights.map((hl, idx) => (
-                <div 
-                  key={idx}
-                  style={{
-                    padding: '14px 20px',
-                    borderBottom: `1px solid ${currentTheme.muted}30`,
-                    display: 'flex', alignItems: 'flex-start', gap: '12px',
-                    cursor: 'pointer',
-                    transition: 'background 0.2s'
-                  }}
-                  onMouseEnter={e => e.currentTarget.style.background = currentTheme.muted}
-                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                >
-                  <div style={{ width: '3px', minHeight: '24px', background: 'var(--gold)', borderRadius: '2px', flexShrink: 0, marginTop: '2px' }} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: '13px', fontFamily: "'Libre Baskerville', serif", lineHeight: 1.5, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' }}>
-                      "{hl.text}"
+              highlights.map((hl, idx) => {
+                const hlChapter = hl.chapterIndex !== undefined ? hl.chapterIndex : 0;
+                return (
+                  <div 
+                    key={idx}
+                    onClick={() => {
+                      if (hlChapter === currentChapterIndex) {
+                        pendingHighlightTextRef.current = hl.text;
+                        calculatePages();
+                      } else {
+                        pendingHighlightTextRef.current = hl.text;
+                        setCurrentChapterIndex(hlChapter);
+                      }
+                      setShowToc(false);
+                    }}
+                    style={{
+                      padding: '14px 20px',
+                      borderBottom: `1px solid ${currentTheme.muted}30`,
+                      display: 'flex', alignItems: 'flex-start', gap: '12px',
+                      cursor: 'pointer',
+                      transition: 'background 0.2s'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = currentTheme.muted}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                  >
+                    <div style={{ width: '3px', minHeight: '24px', background: 'var(--gold)', borderRadius: '2px', flexShrink: 0, marginTop: '2px' }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '13px', fontFamily: "'Libre Baskerville', serif", lineHeight: 1.5, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' }}>
+                        "{hl.text}"
+                      </div>
+                      <div className="mono" style={{ fontSize: '9px', opacity: 0.4, marginTop: '4px' }}>
+                        {chapters[hlChapter]?.title || `CHAPTER ${hlChapter + 1}`}
+                      </div>
                     </div>
+                    <button onClick={(e) => { e.stopPropagation(); deleteHighlight(idx); }} style={{ opacity: 0.4, flexShrink: 0 }} title="Delete highlight">
+                      <X size={12} />
+                    </button>
                   </div>
-                  <button onClick={(e) => { e.stopPropagation(); deleteHighlight(idx); }} style={{ opacity: 0.4, flexShrink: 0 }} title="Delete highlight">
-                    <X size={12} />
-                  </button>
-                </div>
-              ))
+                );
+              })
             )
           )}
 
@@ -1566,34 +1823,45 @@ const NativeReader = ({ book, onClose, user }) => {
             bookmarks.length === 0 ? (
               <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO BOOKMARKS YET<br/><span style={{ opacity: 0.6, fontSize: '9px' }}>Select text and tap BOOKMARK to add one.</span></div>
             ) : (
-              bookmarks.map((bm, idx) => (
-                <div 
-                  key={idx}
-                  onClick={() => { setPage(bm.page); saveData(bm.page, undefined, undefined); setShowToc(false); }}
-                  style={{
-                    padding: '14px 20px',
-                    borderBottom: `1px solid ${currentTheme.muted}30`,
-                    display: 'flex', alignItems: 'center', gap: '12px',
-                    cursor: 'pointer',
-                    transition: 'background 0.2s'
-                  }}
-                  onMouseEnter={e => e.currentTarget.style.background = currentTheme.muted}
-                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                >
-                  <BookmarkPlus size={14} style={{ opacity: 0.5, flexShrink: 0, color: currentTheme.accent }} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: '12px', fontFamily: "'Libre Baskerville', serif", lineHeight: 1.5 }}>
-                      {bm.excerpt}
+              bookmarks.map((bm, idx) => {
+                const bmChapter = bm.chapterIndex !== undefined ? bm.chapterIndex : 0;
+                return (
+                  <div 
+                    key={idx}
+                    onClick={() => { 
+                      if (bmChapter === currentChapterIndex) {
+                        goToPage(bm.page);
+                      } else {
+                        pendingPageRef.current = bm.page;
+                        setCurrentChapterIndex(bmChapter);
+                      }
+                      setShowToc(false); 
+                    }}
+                    style={{
+                      padding: '14px 20px',
+                      borderBottom: `1px solid ${currentTheme.muted}30`,
+                      display: 'flex', alignItems: 'center', gap: '12px',
+                      cursor: 'pointer',
+                      transition: 'background 0.2s'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = currentTheme.muted}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                  >
+                    <BookmarkPlus size={14} style={{ opacity: 0.5, flexShrink: 0, color: currentTheme.accent }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '12px', fontFamily: "'Libre Baskerville', serif", lineHeight: 1.5 }}>
+                        {bm.excerpt}
+                      </div>
+                      <div className="mono" style={{ fontSize: '9px', opacity: 0.4, marginTop: '4px' }}>
+                        {chapters[bmChapter]?.title || `CHAPTER ${bmChapter + 1}`} · PAGE {bm.page + 1} · {new Date(bm.time).toLocaleDateString()}
+                      </div>
                     </div>
-                    <div className="mono" style={{ fontSize: '9px', opacity: 0.4, marginTop: '4px' }}>
-                      PAGE {bm.page + 1} · {new Date(bm.time).toLocaleDateString()}
-                    </div>
+                    <button onClick={(e) => { e.stopPropagation(); deleteBookmark(idx); }} style={{ opacity: 0.4, flexShrink: 0 }} title="Delete bookmark">
+                      <X size={12} />
+                    </button>
                   </div>
-                  <button onClick={(e) => { e.stopPropagation(); deleteBookmark(idx); }} style={{ opacity: 0.4, flexShrink: 0 }} title="Delete bookmark">
-                    <X size={12} />
-                  </button>
-                </div>
-              ))
+                );
+              })
             )
           )}
         </div>
@@ -1684,12 +1952,16 @@ const NativeReader = ({ book, onClose, user }) => {
         <div style={{
           width: '100vw', height: '100vh', 
           overflow: 'hidden', position: 'relative',
-          perspective: '2500px'
         }}>
           {/* Optional Spine for Spread */}
           {effectiveSpread && (
             <div className="spread-spine" />
           )}    
+
+          <div className={`chapter-loading-overlay ${chapterLoading ? 'active' : ''}`} style={{ background: currentTheme.bg }}>
+            <div className="pulsing-ember-dot" />
+          </div>
+
           <div 
             className="page-slider"
             style={{
@@ -1701,8 +1973,9 @@ const NativeReader = ({ book, onClose, user }) => {
           >
             <div 
               ref={contentRef}
-              className={`reader-content ${isRecalculating ? 'recalculating' : ''}`}
+              className="reader-content"
               style={{
+                width: 'max-content',
                 height: 'calc(100vh - 140px)',
                 marginTop: '70px',
                 columnWidth: colWidthCalc,
@@ -1718,7 +1991,7 @@ const NativeReader = ({ book, onClose, user }) => {
                   ? "'Noto Sans Devanagari', 'Libre Baskerville', Georgia, serif"
                   : activeFontFamily,
                 boxSizing: 'border-box',
-                overflow: 'hidden',
+                overflow: 'visible',
                 wordBreak: 'break-word',
               }}
               dangerouslySetInnerHTML={{ __html: bookHtml }}
