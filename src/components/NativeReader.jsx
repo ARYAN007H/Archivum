@@ -777,6 +777,45 @@ const NativeReader = ({ book, onClose, user }) => {
     return () => clearTimeout(timer);
   }, [currentChapterIndex, chapters]);
 
+  const restoreHighlights = (container, savedHighlights, chapterIdx) => {
+    if (!savedHighlights || savedHighlights.length === 0) return;
+    
+    const chapterHighlights = savedHighlights.filter(hl => {
+      const hlChap = hl.chapterIndex !== undefined ? hl.chapterIndex : 0;
+      return hlChap === chapterIdx;
+    });
+
+    chapterHighlights.forEach(hl => {
+      let occurrenceCount = 0;
+      const hlText = hl.text;
+      const targetIndex = hl.index;
+
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.parentNode.tagName === 'MARK') continue;
+        
+        const text = node.nodeValue;
+        let pos = text.indexOf(hlText);
+        while (pos !== -1) {
+          if (occurrenceCount === targetIndex) {
+            const split1 = node.splitText(pos);
+            split1.splitText(hlText.length);
+            
+            const mark = document.createElement('mark');
+            mark.appendChild(split1.cloneNode(true));
+            split1.parentNode.replaceChild(mark, split1);
+            
+            walker.currentNode = mark;
+            return;
+          }
+          occurrenceCount++;
+          pos = text.indexOf(hlText, pos + 1);
+        }
+      }
+    });
+  };
+
   useEffect(() => {
     if (bookHtml && contentRef.current) {
       const injectedImgs = contentRef.current.querySelectorAll('img');
@@ -840,45 +879,6 @@ const NativeReader = ({ book, onClose, user }) => {
       };
     }
   }, [bookHtml, highlights, currentChapterIndex, calculatePages]);
-
-  const restoreHighlights = (container, savedHighlights, chapterIdx) => {
-    if (!savedHighlights || savedHighlights.length === 0) return;
-    
-    const chapterHighlights = savedHighlights.filter(hl => {
-      const hlChap = hl.chapterIndex !== undefined ? hl.chapterIndex : 0;
-      return hlChap === chapterIdx;
-    });
-
-    chapterHighlights.forEach(hl => {
-      let occurrenceCount = 0;
-      const hlText = hl.text;
-      const targetIndex = hl.index;
-
-      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
-      let node;
-      while ((node = walker.nextNode())) {
-        if (node.parentNode.tagName === 'MARK') continue;
-        
-        const text = node.nodeValue;
-        let pos = text.indexOf(hlText);
-        while (pos !== -1) {
-          if (occurrenceCount === targetIndex) {
-            const split1 = node.splitText(pos);
-            split1.splitText(hlText.length);
-            
-            const mark = document.createElement('mark');
-            mark.appendChild(split1.cloneNode(true));
-            split1.parentNode.replaceChild(mark, split1);
-            
-            walker.currentNode = mark;
-            return;
-          }
-          occurrenceCount++;
-          pos = text.indexOf(hlText, pos + 1);
-        }
-      }
-    });
-  };
 
   useEffect(() => {
     if (!loading) {
