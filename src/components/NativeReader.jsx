@@ -302,6 +302,11 @@ const NativeReader = ({ book, onClose, user }) => {
   const sessionStartTime = useRef(Date.now());
   const touchStartX = useRef(0);
   const touchEndX = useRef(0);
+  const touchStartY = useRef(0);
+  const touchEndY = useRef(0);
+
+  const visibleElementIndexRef = useRef(0);
+  const isInitialLoadRef = useRef(true);
 
   const contentRef = useRef(null);
   const [totalPages, setTotalPages] = useState(1);
@@ -322,6 +327,30 @@ const NativeReader = ({ book, onClose, user }) => {
       isMountedRef.current = false;
     };
   }, []);
+
+  const updateVisibleElementIndex = useCallback((currentPage) => {
+    if (!contentRef.current) return;
+    const children = contentRef.current.children;
+    if (children.length === 0) return;
+    
+    const viewWidth = window.innerWidth;
+    const leftEdge = currentPage * viewWidth;
+    
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (child.offsetLeft >= leftEdge) {
+        visibleElementIndexRef.current = i;
+        localStorage.setItem(`archivum_visible_index_${book.id}`, i.toString());
+        return;
+      }
+    }
+  }, [book.id]);
+
+  useEffect(() => {
+    if (contentRef.current && !chapterLoading && !isRecalculating) {
+      updateVisibleElementIndex(page);
+    }
+  }, [page, chapterLoading, isRecalculating, updateVisibleElementIndex]);
 
   useEffect(() => {
     if (!showControls) return;
@@ -417,6 +446,7 @@ const NativeReader = ({ book, onClose, user }) => {
       if (!signal.aborted) {
         pendingChapterRef.current = decodedChapter;
         pendingPageRef.current = decodedPage;
+        isInitialLoadRef.current = true;
         setPage(decodedPage);
         setCurrentChapterIndex(decodedChapter);
         setHighlights(savedHighlights);
@@ -746,13 +776,20 @@ const NativeReader = ({ book, onClose, user }) => {
         setTotalPages(pages);
         
         let targetPage = 0;
+        
+        // Priority 1: Check pending page references (e.g. crossing chapters or initial load)
         if (pendingPageRef.current === 'last') {
           targetPage = pages - 1;
-        } else if (typeof pendingPageRef.current === 'number') {
-          targetPage = Math.min(Math.max(pendingPageRef.current, 0), pages - 1);
+          pendingPageRef.current = 0;
+          isInitialLoadRef.current = false;
+        } else if (isInitialLoadRef.current || (typeof pendingPageRef.current === 'number' && pendingPageRef.current !== 0)) {
+          const startPage = typeof pendingPageRef.current === 'number' ? pendingPageRef.current : 0;
+          targetPage = Math.min(Math.max(startPage, 0), pages - 1);
+          pendingPageRef.current = 0;
+          isInitialLoadRef.current = false;
         }
-        
-        if (pendingAnchorIdRef.current) {
+        // Priority 2: Check pending anchor ID
+        else if (pendingAnchorIdRef.current) {
           const id = pendingAnchorIdRef.current;
           const target = contentRef.current.querySelector(`#${CSS.escape(id)}, [id="${id}"]`);
           if (target) {
@@ -760,8 +797,8 @@ const NativeReader = ({ book, onClose, user }) => {
           }
           pendingAnchorIdRef.current = null;
         }
-
-        if (pendingHighlightTextRef.current) {
+        // Priority 3: Check pending highlight text search
+        else if (pendingHighlightTextRef.current) {
           const text = pendingHighlightTextRef.current;
           const marks = Array.from(contentRef.current.querySelectorAll('mark'));
           const match = marks.find(m => m.textContent.includes(text));
@@ -784,10 +821,23 @@ const NativeReader = ({ book, onClose, user }) => {
           }
           pendingHighlightTextRef.current = null;
         }
+        // Priority 4: Restore reading position based on first visible child element index (resize / font-adjust)
+        else {
+          const savedIndexStr = localStorage.getItem(`archivum_visible_index_${book.id}`);
+          const elementIndex = savedIndexStr !== null ? parseInt(savedIndexStr, 10) : visibleElementIndexRef.current;
+          
+          if (elementIndex > 0 && contentRef.current.children[elementIndex]) {
+            const targetChild = contentRef.current.children[elementIndex];
+            targetPage = Math.floor(targetChild.offsetLeft / viewWidth);
+            console.log(`Restored page to ${targetPage} based on visible element index ${elementIndex}`);
+          } else {
+            targetPage = Math.min(Math.max(page, 0), pages - 1);
+          }
+        }
         
+        targetPage = Math.min(Math.max(targetPage, 0), pages - 1);
         console.log("Setting page to:", targetPage, "and setChapterLoading(false)");
         setPage(targetPage);
-        pendingPageRef.current = 0; // reset
         setIsRecalculating(false);
         setChapterLoading(false);
         
@@ -800,7 +850,7 @@ const NativeReader = ({ book, onClose, user }) => {
       setIsRecalculating(false);
       setChapterLoading(false);
     }
-  }, [currentChapterIndex]);
+  }, [book.id, page, chapterLoading]);
 
   const goToPage = (targetPage) => {
     setPage(targetPage);
@@ -870,7 +920,14 @@ const NativeReader = ({ book, onClose, user }) => {
     if (bookHtml && contentRef.current) {
       const injectedImgs = contentRef.current.querySelectorAll('img');
       injectedImgs.forEach(img => {
-        img.onerror = () => { img.style.display = 'none'; };
+        img.onload = () => {
+          console.log("Image loaded dynamically, recalculating pages...");
+          calculatePages();
+        };
+        img.onerror = () => { 
+          img.style.display = 'none'; 
+          calculatePages();
+        };
         img.style.maxWidth = '100%';
         img.style.maxHeight = '35vh';
         img.style.height = 'auto';
@@ -1022,14 +1079,15 @@ const NativeReader = ({ book, onClose, user }) => {
   const currentTheme = getThemeVars();
   
   const effectiveSpread = isMobile ? false : spread;
-  // Exact math: viewportWidth = paddingLeft + col1 + gap + col2 + paddingRight
-  // For spread (2 cols): colWidth = (100vw - 2*pad - gap) / 2
-  // For single: colWidth = 100vw - 2*pad
+  // Exact math for multi-column horizontal pagination:
+  // columnGap = 2 * pad
+  // colWidth = 100vw / numCols - 2 * pad
+  // This places columns exactly at multiples of 100vw, eliminating horizontal alignment drift.
   const marginOption = MARGIN_OPTIONS.find(m => m.id === marginSize) || MARGIN_OPTIONS[1];
   const pad = isMobile ? marginOption.mobile : marginOption.desktop;
-  const gap = effectiveSpread ? 80 : 0;
+  const gap = 2 * pad;
   const numCols = effectiveSpread ? 2 : 1;
-  const colWidthCalc = `calc((100vw - ${2 * pad}px - ${gap}px) / ${numCols})`;
+  const colWidthCalc = `calc(${100 / numCols}vw - ${2 * pad}px)`;
   const activeFontFamily = FONT_OPTIONS.find(f => f.id === fontFamily)?.family || FONT_OPTIONS[0].family;
 
   const readerCursorRef = useRef(null);
@@ -1201,20 +1259,26 @@ const NativeReader = ({ book, onClose, user }) => {
   };
 
   const handleTouchStart = (e) => {
-    touchStartX.current = e.changedTouches[0].screenX;
+    touchStartX.current = e.changedTouches[0].clientX;
+    touchStartY.current = e.changedTouches[0].clientY;
   };
   
   const handleTouchEnd = (e) => {
-    touchEndX.current = e.changedTouches[0].screenX;
+    touchEndX.current = e.changedTouches[0].clientX;
+    touchEndY.current = e.changedTouches[0].clientY;
     handleSwipe();
   };
   
   const handleSwipe = () => {
-    const threshold = 50; 
-    const diff = touchEndX.current - touchStartX.current;
+    const minHorizontal = 40; 
+    const maxVertical = 50;
+    const diffX = touchEndX.current - touchStartX.current;
+    const diffY = Math.abs(touchEndY.current - touchStartY.current);
     
-    if (diff < -threshold) next();
-    else if (diff > threshold) prev();
+    if (Math.abs(diffX) > minHorizontal && diffY < maxVertical) {
+      if (diffX < 0) next();
+      else prev();
+    }
   };
 
   const navigateToElement = (element) => {
@@ -1534,7 +1598,11 @@ const NativeReader = ({ book, onClose, user }) => {
       {/* SEARCH BAR */}
       {showSearch && (
         <div className="reader-settings" style={{ background: currentTheme.bg, top: '70px', right: isMobile ? '16px' : '160px', left: isMobile ? '16px' : 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <form onSubmit={handleSearch} style={{ display: 'flex', gap: '8px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="mono" style={{ fontSize: '10px', opacity: 0.6 }}>SEARCH</span>
+            <button onClick={() => { setShowSearch(false); clearSearch(); }} style={{ color: 'var(--text-secondary)', opacity: 0.7 }} title="Close search"><X size={14}/></button>
+          </div>
+          <form onSubmit={handleSearch} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <input 
               autoFocus
               className="mono auth-input"
@@ -1542,7 +1610,7 @@ const NativeReader = ({ book, onClose, user }) => {
               placeholder="Search..." 
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              style={{ background: 'transparent', border: 'none', borderBottom: `1px solid ${currentTheme.muted}`, outline: 'none', color: currentTheme.color, width: '160px', padding: '4px' }}
+              style={{ background: 'transparent', border: 'none', borderBottom: `1px solid ${currentTheme.muted}`, outline: 'none', color: currentTheme.color, flex: 1, padding: '4px' }}
             />
             <button type="submit" style={{ opacity: 0.6 }}><Search size={16}/></button>
           </form>
@@ -1565,20 +1633,36 @@ const NativeReader = ({ book, onClose, user }) => {
       {showSettings && (
         <div className="reader-settings-v2" style={{ background: currentTheme.bg, borderColor: currentTheme.muted }}>
           {/* Settings Tabs */}
-          <div className="settings-tabs">
+          <div className="settings-tabs" style={{ display: 'flex', alignItems: 'center' }}>
             <button 
               className={`settings-tab ${settingsTab === 'style' ? 'active' : ''}`}
               onClick={() => setSettingsTab('style')}
-              style={{ color: settingsTab === 'style' ? currentTheme.accent : 'inherit', borderColor: settingsTab === 'style' ? currentTheme.accent : 'transparent' }}
+              style={{ color: settingsTab === 'style' ? currentTheme.accent : 'inherit', borderColor: settingsTab === 'style' ? currentTheme.accent : 'transparent', flex: 1 }}
             >
               <Type size={14} /> Style
             </button>
             <button 
               className={`settings-tab ${settingsTab === 'layout' ? 'active' : ''}`}
               onClick={() => setSettingsTab('layout')}
-              style={{ color: settingsTab === 'layout' ? currentTheme.accent : 'inherit', borderColor: settingsTab === 'layout' ? currentTheme.accent : 'transparent' }}
+              style={{ color: settingsTab === 'layout' ? currentTheme.accent : 'inherit', borderColor: settingsTab === 'layout' ? currentTheme.accent : 'transparent', flex: 1 }}
             >
               <AlignJustify size={14} /> Layout
+            </button>
+            <button 
+              onClick={() => setShowSettings(false)}
+              style={{ 
+                padding: '12px 16px', 
+                color: 'var(--text-secondary)',
+                background: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                opacity: 0.7
+              }}
+              title="Close settings"
+            >
+              <X size={14} />
             </button>
           </div>
 
@@ -1723,7 +1807,10 @@ const NativeReader = ({ book, onClose, user }) => {
       {/* TTS SETTINGS PANEL */}
       {showTtsPanel && (
         <div className="reader-settings" style={{ background: currentTheme.bg, top: '60px', right: '280px', display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px', minWidth: '220px' }}>
-          <div className="mono" style={{ fontSize: '10px', letterSpacing: '0.1em', opacity: 0.6, marginBottom: '4px' }}>SPEECH SETTINGS</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+            <span className="mono" style={{ fontSize: '10px', letterSpacing: '0.1em', opacity: 0.6 }}>SPEECH SETTINGS</span>
+            <button onClick={() => setShowTtsPanel(false)} style={{ color: 'var(--text-secondary)', opacity: 0.7 }} title="Close speech settings"><X size={14}/></button>
+          </div>
           
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <span className="mono" style={{ fontSize: '10px', opacity: 0.6, minWidth: '40px' }}>RATE</span>
@@ -2064,11 +2151,11 @@ const NativeReader = ({ book, onClose, user }) => {
               ref={contentRef}
               className="reader-content"
               style={{
-                width: 'max-content',
+                width: '100vw',
                 height: 'calc(100vh - 140px)',
                 marginTop: '70px',
                 columnWidth: colWidthCalc,
-                columnCount: numCols,
+                columnCount: 'auto',
                 columnGap: `${gap}px`,
                 columnFill: 'auto',
                 paddingLeft: `${pad}px`,
@@ -2107,7 +2194,7 @@ const NativeReader = ({ book, onClose, user }) => {
         </div>
 
         {/* Page numbers */}
-        {spread ? (
+        {effectiveSpread ? (
           <>
             <div className="page-number" style={{ left: '5vw', width: '38vw', opacity: showControls ? 0.6 : 0, transition: 'opacity 0.3s ease' }}>
               {page * 2 + 1}
