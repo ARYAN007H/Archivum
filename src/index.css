@@ -2710,6 +2710,17 @@ button {
     height: 85vh;
     overflow-y: auto;
   }
+
+  .reader-topbar {
+    padding: 0 16px !important;
+  }
+
+  .reader-settings-v2, .reader-settings {
+    right: 12px !important;
+    left: 12px !important;
+    width: auto !important;
+    top: 70px !important;
+  }
 }
 
 /* Scrollbar for detail panel */

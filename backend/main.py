@@ -100,7 +100,7 @@ def proxy(url: str = Query(..., description="The URL to proxy")):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
         }
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=25)
         content_type = resp.headers.get('content-type', 'application/octet-stream')
         return Response(
             content=resp.content,

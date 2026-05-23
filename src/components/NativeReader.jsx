@@ -56,24 +56,47 @@ const stripGutenbergBoilerplate = (doc) => {
   }
 };
 
-const fetchWithProxy = async (url, responseType = 'text') => {
+const fetchWithProxy = async (url, responseType = 'text', signal = null) => {
   const proxyMakers = [
-    () => `/api/proxy?url=${encodeURIComponent(url)}`,
-    () => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    () => url
+    { make: () => `/api/proxy?url=${encodeURIComponent(url)}`, timeout: 25000 },
+    { make: () => `https://corsproxy.io/?${encodeURIComponent(url)}`, timeout: 10000 },
+    { make: () => url, timeout: 10000 }
   ];
 
-  for (const makeUrl of proxyMakers) {
+  for (const item of proxyMakers) {
     try {
-      const proxyUrl = makeUrl();
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      const proxyUrl = item.make();
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
+      const timeout = setTimeout(() => controller.abort(), item.timeout); // Adaptive timeout
+
+      const abortHandler = () => {
+        controller.abort();
+      };
+      if (signal) {
+        signal.addEventListener('abort', abortHandler);
+      }
+
       const res = await fetch(proxyUrl, { signal: controller.signal });
       clearTimeout(timeout);
+      if (signal) {
+        signal.removeEventListener('abort', abortHandler);
+      }
+
       if (!res.ok) continue;
       if (responseType === 'arraybuffer') return await res.arrayBuffer();
-      return await res.text();
+      
+      const text = await res.text();
+      // Check for corsproxy.io pricing/error responses disguised as 200 OK
+      if (text.includes("Server-side requests are not allowed") || text.includes("Upgrade at https://corsproxy.io")) {
+        console.warn("corsproxy.io pricing limit reached, trying next fallback");
+        continue;
+      }
+      return text;
     } catch (e) {
+      if (e.name === 'AbortError' && signal?.aborted) {
+        throw e;
+      }
       continue; // try next proxy
     }
   }
@@ -291,12 +314,25 @@ const NativeReader = ({ book, onClose, user }) => {
   const [bookmarks, setBookmarks] = useState([]);
 
   const isMountedRef = useRef(true);
+  const [showControls, setShowControls] = useState(true);
+
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!showControls) return;
+    if (showToc || showSettings || showSearch || showTtsPanel) return;
+
+    const timer = setTimeout(() => {
+      setShowControls(false);
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, [showControls, showToc, showSettings, showSearch, showTtsPanel]);
 
   // Persist reader prefs whenever they change
   useEffect(() => {
@@ -321,21 +357,6 @@ const NativeReader = ({ book, onClose, user }) => {
     synth.addEventListener('voiceschanged', loadVoices);
     return () => synth.removeEventListener('voiceschanged', loadVoices);
   }, []);
-
-  // Keyboard shortcuts for reader
-  useEffect(() => {
-    const handler = (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-      if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
-      if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
-      if (e.key === ' ' && !e.shiftKey) { e.preventDefault(); handleTTS(); }
-      if (e.key === '?' || (e.shiftKey && e.key === '/')) { e.preventDefault(); setShowShortcutsModal(v => !v); }
-      if (e.key === 'Escape') { setShowShortcutsModal(false); setShowTtsPanel(false); }
-      if (e.key === 'f' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setShowSearch(v => !v); }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [next, prev, isSpeaking, handleTTS]);
 
   const processAndSetBook = (rawHtmlOrDoc, savedHighlights) => {
     let doc;
@@ -362,6 +383,9 @@ const NativeReader = ({ book, onClose, user }) => {
 
   // Fetch initial data
   useEffect(() => {
+    const abortController = new AbortController();
+    const { signal } = abortController;
+
     const loadSavedData = async () => {
       let savedPage = 0;
       let savedHighlights = [];
@@ -369,7 +393,7 @@ const NativeReader = ({ book, onClose, user }) => {
       if (user && supabase) {
         try {
           const { data } = await supabase.from('reading_progress').select('*').eq('user_id', user.id).eq('book_id', book.id).single();
-          if (data) {
+          if (data && !signal.aborted) {
             savedPage = data.current_page || 0;
             savedHighlights = data.highlights || [];
             savedBookmarks = data.bookmarks || [];
@@ -390,10 +414,9 @@ const NativeReader = ({ book, onClose, user }) => {
         decodedPage = savedPage;
       }
 
-      pendingChapterRef.current = decodedChapter;
-      pendingPageRef.current = decodedPage;
-
-      if (isMountedRef.current) {
+      if (!signal.aborted) {
+        pendingChapterRef.current = decodedChapter;
+        pendingPageRef.current = decodedPage;
         setPage(decodedPage);
         setCurrentChapterIndex(decodedChapter);
         setHighlights(savedHighlights);
@@ -403,15 +426,18 @@ const NativeReader = ({ book, onClose, user }) => {
     };
 
     const loadBook = async () => {
+      if (signal.aborted) return;
       setLoading(true);
       const { savedHighlights } = await loadSavedData();
+      if (signal.aborted) return;
 
       // Internet Archive books: resolve actual download URLs first
       if (book._source === 'archive' && book._iaIdentifier) {
         try {
-          await loadIABook(book._iaIdentifier, savedHighlights);
+          await loadIABook(book._iaIdentifier, savedHighlights, signal);
           return;
         } catch (err) {
+          if (signal.aborted) return;
           console.error('IA load error:', err);
           if (isMountedRef.current) {
             setError('Unable to load this book from Internet Archive.');
@@ -421,18 +447,22 @@ const NativeReader = ({ book, onClose, user }) => {
         }
       }
 
-      await loadHtmlTier(savedHighlights);
+      await loadHtmlTier(savedHighlights, signal);
     };
 
     loadBook();
     const existingTime = parseInt(localStorage.getItem(`archivum_time_${book.id}`) || '0', 10);
     setSessionTime(existingTime);
+
+    return () => {
+      abortController.abort();
+    };
   }, [book, user]);
 
   // ========== Internet Archive book loader ==========
-  const loadIABook = async (identifier, savedHighlights) => {
+  const loadIABook = async (identifier, savedHighlights, signal) => {
     // Fetch metadata to find downloadable files
-    const metaText = await fetchWithProxy(`https://archive.org/metadata/${identifier}/files`);
+    const metaText = await fetchWithProxy(`https://archive.org/metadata/${identifier}/files`, 'text', signal);
     const metaData = JSON.parse(metaText);
     const files = metaData?.result || [];
 
@@ -444,15 +474,19 @@ const NativeReader = ({ book, onClose, user }) => {
     // Find HTML file
     let htmlFile = files.find(f => {
       const name = f.name?.toLowerCase() || '';
-      return (name.endsWith('.html') || name.endsWith('.htm')) && !name.includes('meta');
+      const format = f.format?.toLowerCase() || '';
+      const isOcr = name.includes('_hocr') || name.includes('_djvu') || name.includes('_ocr') || format.includes('hocr') || format.includes('ocr');
+      return (name.endsWith('.html') || name.endsWith('.htm')) && !name.includes('meta') && !isOcr;
     });
 
     const baseUrl = `https://archive.org/download/${identifier}`;
 
     // Fallback: try HTML
     if (htmlFile) {
+      if (signal?.aborted) return;
       const htmlUrl = `${baseUrl}/${encodeURIComponent(htmlFile.name)}`;
-      const htmlText = await fetchWithProxy(htmlUrl);
+      const htmlText = await fetchWithProxy(htmlUrl, 'text', signal);
+      if (signal?.aborted) return;
       const parser = new DOMParser();
       const doc = parser.parseFromString(htmlText, 'text/html');
       doc.querySelectorAll('style, link, script, meta, title').forEach(el => el.remove());
@@ -463,8 +497,10 @@ const NativeReader = ({ book, onClose, user }) => {
 
     // Fallback: try text file
     if (textFile) {
+      if (signal?.aborted) return;
       const textUrl = `${baseUrl}/${encodeURIComponent(textFile.name)}`;
-      const text = await fetchWithProxy(textUrl);
+      const text = await fetchWithProxy(textUrl, 'text', signal);
+      if (signal?.aborted) return;
 
       const lines = text.split('\n');
       let fullHtml = '';
@@ -501,7 +537,7 @@ const NativeReader = ({ book, onClose, user }) => {
   };
 
   // Tier 2: Fetch HTML version from Gutenberg
-  const loadHtmlTier = async (savedHighlights) => {
+  const loadHtmlTier = async (savedHighlights, signal) => {
     try {
       const htmlUrl = book.formats['text/html'] 
         || book.formats['text/html; charset=utf-8']
@@ -511,7 +547,9 @@ const NativeReader = ({ book, onClose, user }) => {
         throw new Error("No HTML format available for this book.");
       }
       
-      const htmlText = await fetchWithProxy(htmlUrl, 'text');
+      if (signal?.aborted) return;
+      const htmlText = await fetchWithProxy(htmlUrl, 'text', signal);
+      if (signal?.aborted) return;
       const doc = new DOMParser().parseFromString(htmlText, 'text/html');
 
       // Line 1: Remove the entire header boilerplate
@@ -535,19 +573,21 @@ const NativeReader = ({ book, onClose, user }) => {
              const absoluteUrl = new URL(src, htmlUrl).href;
              img.setAttribute("src", absoluteUrl);
            } catch(e) {}
-        }
+         }
       }
 
+      if (signal?.aborted) return;
       processAndSetBook(doc, savedHighlights);
     } catch (err) {
+      if (signal?.aborted) return;
       console.error("HTML fetch error:", err);
       // Fallback: try plain text fallback
-      await loadPlainTextFallback(savedHighlights);
+      await loadPlainTextFallback(savedHighlights, signal);
     }
   };
 
   // Tier 3: Fetch plain text directly from Gutenberg
-  const loadPlainTextFallback = async (savedHighlights) => {
+  const loadPlainTextFallback = async (savedHighlights, signal) => {
     try {
       // Try to get plain text from Gutenberg
       const textUrl = book.formats['text/plain; charset=utf-8'] 
@@ -560,7 +600,9 @@ const NativeReader = ({ book, onClose, user }) => {
         return;
       }
 
-      const text = await fetchWithProxy(textUrl, 'text');
+      if (signal?.aborted) return;
+      const text = await fetchWithProxy(textUrl, 'text', signal);
+      if (signal?.aborted) return;
 
       // Strip start/end headers from raw text
       let cleanedText = text;
@@ -637,8 +679,10 @@ const NativeReader = ({ book, onClose, user }) => {
       const doc = parser.parseFromString(`<body>${fullHtml}</body>`, "text/html");
       stripGutenbergBoilerplate(doc);
 
+      if (signal?.aborted) return;
       processAndSetBook(doc, savedHighlights);
     } catch(e) {
+      if (signal?.aborted) return;
       console.error("Fallback error:", e);
       setError("Unable to load this book. Please try another title.");
       setLoading(false);
@@ -690,12 +734,15 @@ const NativeReader = ({ book, onClose, user }) => {
   }, []);
 
   const calculatePages = useCallback(() => {
+    console.log("CALCULATE PAGES CALLED! contentRef.current exists:", !!contentRef.current);
     if (contentRef.current) {
       requestAnimationFrame(() => {
+        console.log("RAF running! contentRef.current still exists:", !!contentRef.current);
         if (!contentRef.current) return;
         const scrollWidth = contentRef.current.scrollWidth;
         const viewWidth = window.innerWidth;
         const pages = Math.max(1, Math.ceil(scrollWidth / viewWidth));
+        console.log("Calculated pages:", pages, "scrollWidth:", scrollWidth, "viewWidth:", viewWidth, "pendingPage:", pendingPageRef.current);
         setTotalPages(pages);
         
         let targetPage = 0;
@@ -738,6 +785,7 @@ const NativeReader = ({ book, onClose, user }) => {
           pendingHighlightTextRef.current = null;
         }
         
+        console.log("Setting page to:", targetPage, "and setChapterLoading(false)");
         setPage(targetPage);
         pendingPageRef.current = 0; // reset
         setIsRecalculating(false);
@@ -748,6 +796,7 @@ const NativeReader = ({ book, onClose, user }) => {
         }
       });
     } else {
+      console.log("calculatePages: contentRef.current is falsy, setting chapterLoading to false");
       setIsRecalculating(false);
       setChapterLoading(false);
     }
@@ -817,6 +866,7 @@ const NativeReader = ({ book, onClose, user }) => {
   };
 
   useEffect(() => {
+    console.log("bookHtml useEffect triggered! bookHtml length:", bookHtml ? bookHtml.length : 0, "contentRef.current:", !!contentRef.current);
     if (bookHtml && contentRef.current) {
       const injectedImgs = contentRef.current.querySelectorAll('img');
       injectedImgs.forEach(img => {
@@ -869,6 +919,7 @@ const NativeReader = ({ book, onClose, user }) => {
 
       requestAnimationFrame(() => {
         setIsRecalculating(true);
+        console.log("Scheduling calculatePages from bookHtml useEffect...");
         setTimeout(calculatePages, 200);
       });
 
@@ -881,8 +932,10 @@ const NativeReader = ({ book, onClose, user }) => {
   }, [bookHtml, highlights, currentChapterIndex, calculatePages]);
 
   useEffect(() => {
+    console.log("loading useEffect triggered! loading:", loading);
     if (!loading) {
       setIsRecalculating(true);
+      console.log("Scheduling calculatePages from loading useEffect...");
       const timer = setTimeout(calculatePages, 200);
       return () => clearTimeout(timer);
     }
@@ -1135,7 +1188,16 @@ const NativeReader = ({ book, onClose, user }) => {
     const third = window.innerWidth / 3;
     if (e.clientX < third) prev();
     else if (e.clientX > third * 2) next();
-    else setShowToc(false); // click center closes toc/settings
+    else {
+      setShowControls(v => !v);
+      setShowToc(false);
+      setShowSettings(false);
+      setShowTtsPanel(false);
+      if (showSearch) {
+        setShowSearch(false);
+        clearSearch();
+      }
+    }
   };
 
   const handleTouchStart = (e) => {
@@ -1247,6 +1309,21 @@ const NativeReader = ({ book, onClose, user }) => {
     
     readCurrentPage();
   }, [isSpeaking, isPaused, readCurrentPage]);
+
+  // Keyboard shortcuts for reader
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
+      if (e.key === ' ' && !e.shiftKey) { e.preventDefault(); handleTTS(); }
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) { e.preventDefault(); setShowShortcutsModal(v => !v); }
+      if (e.key === 'Escape') { setShowShortcutsModal(false); setShowTtsPanel(false); }
+      if (e.key === 'f' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setShowSearch(v => !v); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [next, prev, isSpeaking, handleTTS]);
 
   const stopTTS = useCallback(() => {
     const synth = window.speechSynthesis;
@@ -1369,34 +1446,14 @@ const NativeReader = ({ book, onClose, user }) => {
         display: 'flex', flexDirection: 'column',
         transition: 'background-color 0.4s ease, color 0.4s ease',
         overflow: 'hidden',
-        cursor: 'none'
       }}
     >
-      <style>{`
-        .native-reader-root, .native-reader-root * {
-          cursor: none !important;
-        }
-      `}</style>
-      <div 
-        ref={readerCursorRef}
-        style={{
-          position: 'fixed',
-          top: '-10px',
-          left: '-10px',
-          width: '8px',
-          height: '8px',
-          backgroundColor: 'var(--ember)',
-          borderRadius: '50%',
-          pointerEvents: 'none',
-          zIndex: 9999,
-          transform: 'translate(-50%, -50%)',
-          display: 'none'
-        }}
-      />
       {/* Progress bar at very top */}
       <div style={{
         position: 'absolute', top: 0, left: 0, right: 0, height: '2px', zIndex: 200,
         background: currentTheme.muted,
+        opacity: showControls ? 1 : 0,
+        transition: 'opacity 0.3s ease',
       }}>
         <div style={{
           height: '100%',
@@ -1408,30 +1465,42 @@ const NativeReader = ({ book, onClose, user }) => {
 
       {/* Top bar */}
       <div 
-        className="reader-topbar"
-        onMouseEnter={() => setShowTopBar(true)}
-        onMouseLeave={() => { setShowTopBar(false); setShowSettings(false); setShowToc(false); setShowTtsPanel(false); if (showSearch) { setShowSearch(false); clearSearch(); } }}
+        className={`reader-topbar ${showControls ? 'visible' : ''}`}
+        style={{
+          position: 'absolute', top: 0, left: 0, right: 0,
+          height: '60px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: isMobile ? '0 16px' : '0 40px',
+          zIndex: 100,
+          opacity: showControls ? 1 : 0,
+          pointerEvents: showControls ? 'all' : 'none',
+          transition: 'opacity 0.3s ease, transform 0.3s ease',
+          transform: showControls ? 'translateY(0)' : 'translateY(-10px)',
+          background: 'linear-gradient(to bottom, rgba(6,6,10,0.85), transparent)',
+        }}
       >
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: isMobile ? '12px' : '16px', alignItems: 'center' }}>
           <button onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
             <ArrowLeft size={16} /> <span className="mono" style={{ fontSize: '10px' }}>{!isMobile && "LIBRARY"}</span>
           </button>
-          {!isMobile && (
-            <>
-              <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
-              <button onClick={() => setShowToc(!showToc)} style={{ color: showToc ? 'var(--ember)' : 'var(--text-secondary)' }}>
-                <List size={16} />
-              </button>
-              <button onClick={() => { 
-                const newState = !showSearch; 
-                setShowSearch(newState); 
-                if (!newState) clearSearch(); 
-              }} style={{ color: showSearch ? 'var(--ember)' : 'var(--text-secondary)' }}>
-                <Search size={16} />
-              </button>
-            </>
-          )}
+          <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
+          <button onClick={() => { setShowToc(!showToc); setShowSettings(false); setShowTtsPanel(false); setShowSearch(false); }} style={{ color: showToc ? 'var(--ember)' : 'var(--text-secondary)' }}>
+            <List size={16} />
+          </button>
+          <button onClick={() => { 
+            const newState = !showSearch; 
+            setShowSearch(newState); 
+            setShowToc(false);
+            setShowSettings(false);
+            setShowTtsPanel(false);
+            if (!newState) clearSearch(); 
+          }} style={{ color: showSearch ? 'var(--ember)' : 'var(--text-secondary)' }}>
+            <Search size={16} />
+          </button>
         </div>
+
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
           {/* TTS Controls */}
           <button onClick={handleTTS} style={{ color: isSpeaking ? currentTheme.accent : 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }} title={isSpeaking ? (isPaused ? 'Resume' : 'Pause') : 'Read aloud'}>
@@ -1464,7 +1533,7 @@ const NativeReader = ({ book, onClose, user }) => {
 
       {/* SEARCH BAR */}
       {showSearch && (
-        <div className="reader-settings" style={{ background: currentTheme.bg, top: '60px', right: '160px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <div className="reader-settings" style={{ background: currentTheme.bg, top: '70px', right: isMobile ? '16px' : '160px', left: isMobile ? '16px' : 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
           <form onSubmit={handleSearch} style={{ display: 'flex', gap: '8px' }}>
             <input 
               autoFocus
@@ -1700,7 +1769,7 @@ const NativeReader = ({ book, onClose, user }) => {
 
       {/* SIDEBAR — Tabbed (TOC / Highlights / Bookmarks) */}
       <div style={{
-        position: 'absolute', top: '60px', left: 0, bottom: 0, width: '320px',
+        position: 'absolute', top: '60px', left: 0, bottom: 0, width: isMobile ? '100%' : '320px',
         background: currentTheme.bg, zIndex: 1000,
         borderRight: `1px solid ${currentTheme.muted}`,
         transform: showToc ? 'translateX(0)' : 'translateX(-100%)',
@@ -1709,30 +1778,50 @@ const NativeReader = ({ book, onClose, user }) => {
         boxShadow: showToc ? '20px 0 40px rgba(0,0,0,0.5)' : 'none'
       }}>
         {/* Sidebar tabs */}
-        <div style={{ display: 'flex', borderBottom: `1px solid ${currentTheme.muted}` }}>
-          {[
-            { key: 'toc', label: 'CONTENTS' },
-            { key: 'highlights', label: `HIGHLIGHTS (${highlights.length})` },
-            { key: 'bookmarks', label: `MARKS (${bookmarks.length})` }
-          ].map(tab => (
-            <button
-              key={tab.key}
-              onClick={() => setSidebarTab(tab.key)}
-              className="mono"
-              style={{
-                flex: 1,
-                padding: '14px 8px',
-                fontSize: '9px',
-                letterSpacing: '0.08em',
-                borderBottom: sidebarTab === tab.key ? `2px solid ${currentTheme.accent}` : '2px solid transparent',
-                color: sidebarTab === tab.key ? currentTheme.accent : currentTheme.color,
-                opacity: sidebarTab === tab.key ? 1 : 0.5,
-                transition: 'all 0.2s'
-              }}
-            >
-              {tab.label}
-            </button>
-          ))}
+        <div style={{ display: 'flex', borderBottom: `1px solid ${currentTheme.muted}`, alignItems: 'center' }}>
+          <div style={{ display: 'flex', flex: 1 }}>
+            {[
+              { key: 'toc', label: isMobile ? 'TOC' : 'CONTENTS' },
+              { key: 'highlights', label: isMobile ? `HL (${highlights.length})` : `HIGHLIGHTS (${highlights.length})` },
+              { key: 'bookmarks', label: isMobile ? `MARKS (${bookmarks.length})` : `MARKS (${bookmarks.length})` }
+            ].map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setSidebarTab(tab.key)}
+                className="mono"
+                style={{
+                  flex: 1,
+                  padding: '14px 8px',
+                  fontSize: '9px',
+                  letterSpacing: '0.08em',
+                  borderBottom: sidebarTab === tab.key ? `2px solid ${currentTheme.accent}` : '2px solid transparent',
+                  color: sidebarTab === tab.key ? currentTheme.accent : currentTheme.color,
+                  opacity: sidebarTab === tab.key ? 1 : 0.5,
+                  transition: 'all 0.2s',
+                  background: 'transparent',
+                  border: 'none',
+                  outline: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <button 
+            onClick={() => setShowToc(false)}
+            style={{ 
+              padding: '14px 16px', 
+              color: 'var(--text-secondary)',
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center'
+            }}
+          >
+            <X size={16} />
+          </button>
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
@@ -1935,15 +2024,15 @@ const NativeReader = ({ book, onClose, user }) => {
         {/* Chapter headers for spread */}
         {effectiveSpread ? (
           <>
-            <div className="page-number" style={{ top: '40px', bottom: 'auto', left: '5vw', width: '38vw', fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <div className="page-number" style={{ top: '40px', bottom: 'auto', left: '5vw', width: '38vw', fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: showControls ? 0.5 : 0, transition: 'opacity 0.3s ease' }}>
               {book.title.length > 40 ? book.title.substring(0, 40) + '…' : book.title}
             </div>
-            <div className="page-number" style={{ top: '40px', bottom: 'auto', right: '5vw', width: '38vw', fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <div className="page-number" style={{ top: '40px', bottom: 'auto', right: '5vw', width: '38vw', fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: showControls ? 0.5 : 0, transition: 'opacity 0.3s ease' }}>
               {currentChapterTitle || book.title}
             </div>
           </>
         ) : (
-          <div className="page-number" style={{ top: '40px', bottom: 'auto', left: 0, right: 0, fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '0 20vw' }}>
+          <div className="page-number" style={{ top: '40px', bottom: 'auto', left: 0, right: 0, fontSize: '10px', letterSpacing: '0.15em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '0 20vw', opacity: showControls ? 0.5 : 0, transition: 'opacity 0.3s ease' }}>
             {currentChapterTitle || book.title}
           </div>
         )}
@@ -2020,15 +2109,15 @@ const NativeReader = ({ book, onClose, user }) => {
         {/* Page numbers */}
         {spread ? (
           <>
-            <div className="page-number" style={{ left: '5vw', width: '38vw' }}>
+            <div className="page-number" style={{ left: '5vw', width: '38vw', opacity: showControls ? 0.6 : 0, transition: 'opacity 0.3s ease' }}>
               {page * 2 + 1}
             </div>
-            <div className="page-number" style={{ right: '5vw', width: '38vw' }}>
+            <div className="page-number" style={{ right: '5vw', width: '38vw', opacity: showControls ? 0.6 : 0, transition: 'opacity 0.3s ease' }}>
               {Math.min(page * 2 + 2, totalPages * 2)}
             </div>
           </>
         ) : (
-          <div className="page-number" style={{ left: 0, right: 0 }}>
+          <div className="page-number" style={{ left: 0, right: 0, opacity: showControls ? 0.6 : 0, transition: 'opacity 0.3s ease' }}>
             {page + 1} / {totalPages}
           </div>
         )}

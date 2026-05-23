@@ -286,16 +286,16 @@ const fetchWithTimeout = (url, timeoutMs = 10000) => {
 
 const fetchWithProxy = async (url, responseType = 'json') => {
   const proxyMakers = [
-    () => `/api/proxy?url=${encodeURIComponent(url)}`,
-    () => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    () => url
+    { make: () => `/api/proxy?url=${encodeURIComponent(url)}`, timeout: 25000 },
+    { make: () => `https://corsproxy.io/?${encodeURIComponent(url)}`, timeout: 10000 },
+    { make: () => url, timeout: 10000 }
   ];
 
-  for (const makeUrl of proxyMakers) {
+  for (const item of proxyMakers) {
     try {
-      const proxyUrl = makeUrl();
+      const proxyUrl = item.make();
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12000);
+      const timeout = setTimeout(() => controller.abort(), item.timeout);
       const res = await fetch(proxyUrl, { signal: controller.signal });
       clearTimeout(timeout);
       if (!res.ok) continue;
