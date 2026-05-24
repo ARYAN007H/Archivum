@@ -126,9 +126,23 @@ const getReadingProgress = () => {
   const progress = {};
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
-    if (key?.startsWith('archivum_progress_')) {
-      const bookId = key.replace('archivum_progress_', '');
+    if (key?.startsWith('archivum_progress_percent_')) {
+      const bookId = key.replace('archivum_progress_percent_', '');
       progress[bookId] = parseInt(localStorage.getItem(key)) || 0;
+    }
+  }
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith('archivum_progress_') && !key.startsWith('archivum_progress_percent_')) {
+      const bookId = key.replace('archivum_progress_', '');
+      if (progress[bookId] === undefined) {
+        const rawProgress = parseInt(localStorage.getItem(key)) || 0;
+        if (rawProgress < 10000) {
+          progress[bookId] = Math.min(99, rawProgress);
+        } else {
+          progress[bookId] = 50;
+        }
+      }
     }
   }
   return progress;
@@ -469,6 +483,41 @@ function App() {
     }, 3000);
   }, []);
 
+  const updateOfflineStatus = useCallback(async () => {
+    if (!('caches' in window)) return;
+    try {
+      const cache = await caches.open('archivum-data-v1');
+      const requests = await cache.keys();
+      const cachedIds = new Set();
+      
+      requests.forEach(req => {
+        const url = req.url;
+        const gutMatch = url.match(/\/cache\/epub\/(\d+)\//) || url.match(/\/files\/(\d+)\//);
+        if (gutMatch) {
+          cachedIds.add(gutMatch[1]);
+        }
+        const iaMatch = url.match(/\/metadata\/([^\/]+)/) || url.match(/\/download\/([^\/]+)/);
+        if (iaMatch && !iaMatch[1].endsWith('.js') && !iaMatch[1].endsWith('.css')) {
+          cachedIds.add(`ia_${iaMatch[1]}`);
+        }
+        if (url.includes('/api/proxy') || url.includes('corsproxy.io')) {
+          const decoded = decodeURIComponent(url);
+          const pGutMatch = decoded.match(/\/cache\/epub\/(\d+)\//) || decoded.match(/\/files\/(\d+)\//);
+          if (pGutMatch) {
+            cachedIds.add(pGutMatch[1]);
+          }
+          const pIaMatch = decoded.match(/\/metadata\/([^\/]+)/) || decoded.match(/\/download\/([^\/]+)/);
+          if (pIaMatch) {
+            cachedIds.add(`ia_${pIaMatch[1]}`);
+          }
+        }
+      });
+      setOfflineBookIds(cachedIds);
+    } catch (e) {
+      console.error("Error reading cache for offline status:", e);
+    }
+  }, []);
+
   // Library State
   const [view, setView] = useState('catalog'); // 'catalog' | 'library' | 'saved' | 'stats'
   const [libraryBooks, setLibraryBooks] = useState([]);
@@ -548,6 +597,37 @@ function App() {
     }
   };
 
+  const removeBookProgress = async (bookId) => {
+    if (window.confirm("Are you sure you want to remove this book from your library and reset your reading progress?")) {
+      if (user && supabase) {
+        try {
+          await supabase.from('reading_progress').delete().eq('user_id', user.id).eq('book_id', bookId);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      localStorage.removeItem(`archivum_progress_${bookId}`);
+      localStorage.removeItem(`archivum_progress_percent_${bookId}`);
+      localStorage.removeItem(`archivum_visible_index_${bookId}`);
+      
+      try {
+        const localMeta = JSON.parse(localStorage.getItem('archivum_library_metadata') || '{}');
+        delete localMeta[bookId];
+        localStorage.setItem('archivum_library_metadata', JSON.stringify(localMeta));
+      } catch (e) {}
+
+      setProgressMap(prev => {
+        const copy = { ...prev };
+        delete copy[bookId];
+        return copy;
+      });
+
+      setLibraryBooks(prev => prev.filter(b => b.id !== bookId));
+      addToast("Book progress reset and removed.");
+      closeBook();
+    }
+  };
+
   const isBookSaved = (bookId) => savedBooks.some(b => b.id === bookId);
 
   // Reading stats helpers
@@ -592,7 +672,16 @@ function App() {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
       if (key.startsWith('archivum_highlights_') || key.startsWith('archivum_bookmarks_') || key.startsWith('archivum_progress_')) {
-        const bookId = parseInt(key.split('_').pop(), 10);
+        let bookId = '';
+        if (key.startsWith('archivum_progress_')) {
+          bookId = key.replace('archivum_progress_', '');
+        } else if (key.startsWith('archivum_highlights_')) {
+          bookId = key.replace('archivum_highlights_', '');
+        } else if (key.startsWith('archivum_bookmarks_')) {
+          bookId = key.replace('archivum_bookmarks_', '');
+        }
+        if (!bookId || bookId.startsWith('percent_')) continue; // skip the percentage key
+        
         if (!updates[bookId]) updates[bookId] = { user_id: userId, book_id: bookId };
         try {
           const val = JSON.parse(localStorage.getItem(key));
@@ -778,6 +867,13 @@ function App() {
   const fetchLibrary = useCallback(async () => {
     setLibraryLoading(true);
     let ids = [];
+    let localMeta = {};
+    try {
+      localMeta = JSON.parse(localStorage.getItem('archivum_library_metadata') || '{}');
+    } catch (e) {
+      console.error("Error reading library metadata:", e);
+    }
+
     if (user && supabase) {
       try {
         const { data } = await supabase.from('reading_progress').select('book_id').eq('user_id', user.id);
@@ -786,7 +882,7 @@ function App() {
     } else {
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (key.startsWith('archivum_progress_')) {
+        if (key.startsWith('archivum_progress_') && !key.startsWith('archivum_progress_percent_')) {
           ids.push(key.replace('archivum_progress_', ''));
         }
       }
@@ -799,12 +895,73 @@ function App() {
       setLibraryLoading(false);
       return;
     }
-    
-    try {
-      const res = await fetch(`https://gutendex.com/books?ids=${ids.join(',')}`);
-      const data = await res.json();
-      setLibraryBooks(data.results);
-    } catch(e) { console.error(e); }
+
+    const resolvedBooks = [];
+    const missingIds = [];
+
+    ids.forEach(id => {
+      if (localMeta[id]) {
+        resolvedBooks.push(localMeta[id]);
+      } else {
+        missingIds.push(id);
+      }
+    });
+
+    if (missingIds.length > 0) {
+      const gutIds = missingIds.filter(id => !id.toString().startsWith('ia_'));
+      if (gutIds.length > 0) {
+        try {
+          const res = await fetch(`https://gutendex.com/books?ids=${gutIds.join(',')}`);
+          const data = await res.json();
+          if (data.results) {
+            data.results.forEach(b => {
+              resolvedBooks.push(b);
+              localMeta[b.id] = {
+                ...b,
+                lastRead: Date.now() - 86400000
+              };
+            });
+          }
+        } catch(e) { console.error(e); }
+      }
+
+      const iaIds = missingIds.filter(id => id.toString().startsWith('ia_'));
+      for (const iaId of iaIds) {
+        const identifier = iaId.replace('ia_', '');
+        try {
+          const res = await fetch(`https://archive.org/metadata/${identifier}`);
+          const data = await res.json();
+          if (data?.metadata) {
+            const meta = data.metadata;
+            const normBook = normalizeIABook({
+              identifier,
+              creator: meta.creator,
+              language: meta.language,
+              subject: meta.subject,
+              downloads: meta.downloads,
+              title: meta.title
+            });
+            resolvedBooks.push(normBook);
+            localMeta[iaId] = {
+              ...normBook,
+              lastRead: Date.now() - 86400000
+            };
+          }
+        } catch(e) { console.error(e); }
+      }
+
+      try {
+        localStorage.setItem('archivum_library_metadata', JSON.stringify(localMeta));
+      } catch (e) {}
+    }
+
+    resolvedBooks.sort((a, b) => {
+      const timeA = localMeta[a.id]?.lastRead || 0;
+      const timeB = localMeta[b.id]?.lastRead || 0;
+      return timeB - timeA;
+    });
+
+    setLibraryBooks(resolvedBooks);
     setLibraryLoading(false);
   }, [user]);
 
@@ -857,7 +1014,8 @@ function App() {
   useEffect(() => {
     setProgressMap(getReadingProgress());
     setStreak(getReadingStreak());
-  }, []);
+    updateOfflineStatus();
+  }, [updateOfflineStatus]);
 
   // Cmd+K keyboard shortcut
   useEffect(() => {
@@ -954,6 +1112,28 @@ function App() {
   const startReading = () => {
     recordReadingDay();
     setStreak(getReadingStreak());
+
+    // Save book metadata for library caching
+    try {
+      const libraryMeta = JSON.parse(localStorage.getItem('archivum_library_metadata') || '{}');
+      libraryMeta[selectedBook.id] = {
+        id: selectedBook.id,
+        title: selectedBook.title,
+        authors: selectedBook.authors,
+        formats: selectedBook.formats,
+        languages: selectedBook.languages,
+        subjects: selectedBook.subjects,
+        download_count: selectedBook.download_count,
+        _source: selectedBook._source,
+        _iaIdentifier: selectedBook._iaIdentifier,
+        lastRead: Date.now(),
+        progressPercent: libraryMeta[selectedBook.id]?.progressPercent || 0
+      };
+      localStorage.setItem('archivum_library_metadata', JSON.stringify(libraryMeta));
+    } catch (e) {
+      console.error("Error saving library metadata:", e);
+    }
+
     // Cinematic book-open transition
     let coverUrl = selectedBook.formats?.['image/jpeg'];
     if (!coverUrl && selectedBook._source === 'archive') {
@@ -975,7 +1155,12 @@ function App() {
         <div id="cursor-dot" ref={cursorRef}></div>
         <NativeReader 
           book={selectedBook}
-          onClose={() => { setReaderOpen(false); document.body.style.overflow = 'auto'; }} 
+          onClose={() => { 
+            setReaderOpen(false); 
+            document.body.style.overflow = 'auto'; 
+            updateOfflineStatus();
+            setProgressMap(getReadingProgress());
+          }} 
           user={user}
         />
       </>
@@ -1218,7 +1403,7 @@ function App() {
                     }}
                   >
                     {[15, 30, 45, 60, 90, 120].map(mins => (
-                      <option key={mins} value={mins}>{mins} MINS</option>
+                      <option key={mins} value={mins} style={{ background: 'var(--bg-raised)', color: 'var(--text-primary)' }}>{mins} MINS</option>
                     ))}
                   </select>
                 </div>
@@ -1305,6 +1490,7 @@ function App() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <span className="lang-badge">{lang}</span>
                       {book._source === 'archive' && <span className="source-badge ia">IA</span>}
+                      {offlineBookIds.has(book.id) && <span className="source-badge ia" style={{ background: 'rgba(191, 155, 90, 0.15)', borderColor: 'rgba(191, 155, 90, 0.25)', color: 'var(--gold)' }} title="Available Offline">OFFLINE</span>}
                     </div>
                     {subjectClean && <span style={{ color: 'var(--text-muted)', fontSize: '9px' }}>{subjectClean.toUpperCase()}</span>}
                   </div>
@@ -1397,14 +1583,34 @@ function App() {
                 <div className="mono text-secondary" style={{ marginBottom: '8px' }}>{selectedBook.download_count?.toLocaleString() || '0'} readers worldwide</div>
                 <div style={{ flex: 1, minHeight: '24px' }}></div>
                 
-                <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
-                  <button className="btn-primary" onClick={startReading} style={{ flex: 1, fontSize: '16px', padding: '18px' }}>
-                    OPEN &amp; READ THIS BOOK &rarr;
-                  </button>
-                  <button className={`detail-save-btn ${isBookSaved(selectedBook.id) ? 'saved' : ''}`} onClick={(e) => toggleSaveBook(selectedBook, e)} style={{ padding: '18px' }}>
-                    <Heart size={18} fill={isBookSaved(selectedBook.id) ? 'currentColor' : 'none'} />
-                  </button>
+                <div style={{ display: 'flex', flexDirection: 'column', width: '100%', gap: '8px', marginBottom: '16px' }}>
+                  <div style={{ display: 'flex', gap: '12px' }}>
+                    <button className="btn-primary" onClick={startReading} style={{ flex: 1, fontSize: '16px', padding: '18px' }}>
+                      {progressMap[selectedBook.id] !== undefined ? 'CONTINUE READING \u2192' : 'OPEN & READ THIS BOOK \u2192'}
+                    </button>
+                    <button className={`detail-save-btn ${isBookSaved(selectedBook.id) ? 'saved' : ''}`} onClick={(e) => toggleSaveBook(selectedBook, e)} style={{ padding: '18px' }}>
+                      <Heart size={18} fill={isBookSaved(selectedBook.id) ? 'currentColor' : 'none'} />
+                    </button>
+                  </div>
+                  {progressMap[selectedBook.id] !== undefined && (
+                    <button 
+                      className="btn-ghost" 
+                      onClick={() => removeBookProgress(selectedBook.id)} 
+                      style={{ 
+                        padding: '12px', 
+                        fontSize: '11px', 
+                        color: 'var(--ember)', 
+                        borderColor: 'rgba(224, 78, 42, 0.2)',
+                        width: '100%',
+                        letterSpacing: '0.05em',
+                        fontFamily: "'JetBrains Mono', monospace"
+                      }}
+                    >
+                      RESET PROGRESS &amp; REMOVE FROM LIBRARY
+                    </button>
+                  )}
                 </div>
+                
                 <a href={selectedBook._source === 'archive' ? `https://archive.org/details/${selectedBook._iaIdentifier}` : `https://gutenberg.org/ebooks/${selectedBook.id}`} target="_blank" rel="noreferrer" className="mono text-secondary" style={{ textDecoration: 'none' }}>{selectedBook._source === 'archive' ? 'VIEW ON ARCHIVE.ORG' : 'VIEW ON GUTENBERG'} &nearr;</a>
               </div>
             </div>

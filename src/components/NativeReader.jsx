@@ -738,6 +738,8 @@ const NativeReader = ({ book, onClose, user }) => {
       }
 
       const compositeProgress = currentChapterIndex * 10000 + resolvedPage;
+      const totalChaps = chapters.length || 1;
+      const overallPercent = Math.min(100, Math.max(0, Math.round(((currentChapterIndex + (resolvedPage / Math.max(1, totalPages))) / totalChaps) * 100)));
 
       if (user && supabase) {
         supabase.from('reading_progress').upsert({
@@ -754,6 +756,26 @@ const NativeReader = ({ book, onClose, user }) => {
         localStorage.setItem(`archivum_highlights_${book.id}`, JSON.stringify(resolvedHighlights));
         localStorage.setItem(`archivum_bookmarks_${book.id}`, JSON.stringify(resolvedBookmarks));
       }
+      
+      localStorage.setItem(`archivum_progress_percent_${book.id}`, overallPercent.toString());
+
+      try {
+        const libraryMeta = JSON.parse(localStorage.getItem('archivum_library_metadata') || '{}');
+        libraryMeta[book.id] = {
+          id: book.id,
+          title: book.title,
+          authors: book.authors,
+          formats: book.formats,
+          languages: book.languages,
+          subjects: book.subjects,
+          download_count: book.download_count,
+          _source: book._source,
+          _iaIdentifier: book._iaIdentifier,
+          lastRead: Date.now(),
+          progressPercent: overallPercent
+        };
+        localStorage.setItem('archivum_library_metadata', JSON.stringify(libraryMeta));
+      } catch (e) {}
     };
   });
 
@@ -771,7 +793,7 @@ const NativeReader = ({ book, onClose, user }) => {
         if (!contentRef.current) return;
         const scrollWidth = contentRef.current.scrollWidth;
         const viewWidth = window.innerWidth;
-        const pages = Math.max(1, Math.ceil(scrollWidth / viewWidth));
+        const pages = Math.max(1, Math.round(scrollWidth / viewWidth));
         console.log("Calculated pages:", pages, "scrollWidth:", scrollWidth, "viewWidth:", viewWidth, "pendingPage:", pendingPageRef.current);
         setTotalPages(pages);
         
@@ -1833,7 +1855,7 @@ const NativeReader = ({ book, onClose, user }) => {
                 setTtsVoice(v || null);
               }}
               style={{
-                background: 'transparent',
+                background: currentTheme.bg,
                 border: `1px solid ${currentTheme.muted}`,
                 color: currentTheme.color,
                 padding: '6px 8px',
@@ -1845,9 +1867,9 @@ const NativeReader = ({ book, onClose, user }) => {
                 maxWidth: '200px'
               }}
             >
-              <option value="">Default</option>
+              <option value="" style={{ background: currentTheme.bg, color: currentTheme.color }}>Default</option>
               {availableVoices.map(v => (
-                <option key={v.name} value={v.name}>{v.name} ({v.lang})</option>
+                <option key={v.name} value={v.name} style={{ background: currentTheme.bg, color: currentTheme.color }}>{v.name} ({v.lang})</option>
               ))}
             </select>
           </div>
