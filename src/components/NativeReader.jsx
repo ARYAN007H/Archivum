@@ -175,19 +175,103 @@ const splitIntoChapters = (doc) => {
     }
   });
 
-  const chapters = [];
   const headings = Array.from(doc.querySelectorAll('h1[id], h2[id], h3[id]'));
 
   if (headings.length === 0) {
-    chapters.push({
-      id: 'book-content',
-      title: 'Book Content',
-      html: doc.body.innerHTML
-    });
-    return chapters;
+    return {
+      chapters: [{
+        id: 'book-content',
+        title: 'Book Content',
+        html: doc.body.innerHTML
+      }],
+      tocItems: []
+    };
   }
 
-  // First segment: from start of body to first heading (if there is content)
+  // Helper to determine if there is substantial content between heading index i and the next heading
+  const isSubstantial = (headingIdx) => {
+    const heading = headings[headingIdx];
+    const nextHeading = headings[headingIdx + 1];
+    const range = doc.createRange();
+    try {
+      range.setStartAfter(heading);
+      if (nextHeading) {
+        range.setEndBefore(nextHeading);
+      } else {
+        if (doc.body.lastChild) {
+          range.setEndAfter(doc.body.lastChild);
+        } else {
+          range.setEndAfter(doc.body);
+        }
+      }
+      const clone = range.cloneContents();
+      // Remove other headings that might be nested or in between
+      clone.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h => h.remove());
+      const text = clone.textContent.trim();
+      if (text.length > 150 || clone.querySelector('img, table, iframe')) {
+        return true;
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+    return false;
+  };
+
+  // Classify each heading as substantial (true) or metadata/consecutive (false)
+  const classified = headings.map((_, idx) => isSubstantial(idx));
+
+  // Determine split indexes
+  const splitIndexes = [0]; // Always split at the first heading
+  const firstSubstantialIdx = classified.indexOf(true);
+
+  if (firstSubstantialIdx > 0) {
+    // If the first substantial heading is after metadata headings, split before it to separate front matter
+    splitIndexes.push(firstSubstantialIdx);
+  }
+
+  let prevSubstantialIdx = firstSubstantialIdx === -1 ? 0 : firstSubstantialIdx;
+  for (let k = prevSubstantialIdx + 1; k < headings.length; k++) {
+    if (classified[k]) {
+      const firstMetaIdx = prevSubstantialIdx + 1;
+      if (firstMetaIdx < k) {
+        // If there are metadata headings in between (e.g. PART I), split at the first one
+        splitIndexes.push(firstMetaIdx);
+      } else {
+        // No metadata headings in between, split directly at k
+        splitIndexes.push(k);
+      }
+      prevSubstantialIdx = k;
+    }
+  }
+
+  // Deduplicate and sort split indexes
+  const sortedSplitIndexes = Array.from(new Set(splitIndexes)).sort((a, b) => a - b);
+
+  // Construct tocItems flat list containing ALL individual headings mapped to their containing chapter
+  const tocItems = [];
+  let currentChapterIdx = 0;
+  for (let idx = 0; idx < headings.length; idx++) {
+    const heading = headings[idx];
+    while (currentChapterIdx + 1 < sortedSplitIndexes.length && idx >= sortedSplitIndexes[currentChapterIdx + 1]) {
+      currentChapterIdx++;
+    }
+    let title = heading.getAttribute('data-title') || heading.textContent.trim();
+    if (title) {
+      if (title.length > 60) {
+        title = title.substring(0, 57) + '...';
+      }
+      tocItems.push({
+        id: heading.getAttribute('id'),
+        title: title,
+        tagName: heading.tagName, // 'H1', 'H2', 'H3'
+        chapterIndex: currentChapterIdx
+      });
+    }
+  }
+
+  const chapters = [];
+
+  // First segment: from start of body to first heading (if there is content and it's not empty)
   const firstHeading = headings[0];
   const preRange = doc.createRange();
   if (doc.body.firstChild) {
@@ -209,15 +293,16 @@ const splitIntoChapters = (doc) => {
     }
   }
 
-  // Loop through headings and create chapters
-  for (let i = 0; i < headings.length; i++) {
-    const currentHeading = headings[i];
-    const nextHeading = headings[i + 1];
-    
+  // Build the chapters based on split points
+  for (let j = 0; j < sortedSplitIndexes.length; j++) {
+    const currentHeadingIdx = sortedSplitIndexes[j];
+    const currentHeading = headings[currentHeadingIdx];
+    const nextHeadingIdx = sortedSplitIndexes[j + 1];
+    const nextHeading = nextHeadingIdx !== undefined ? headings[nextHeadingIdx] : null;
+
     const range = doc.createRange();
     try {
       range.setStartBefore(currentHeading);
-      
       if (nextHeading) {
         range.setEndBefore(nextHeading);
       } else {
@@ -231,10 +316,29 @@ const splitIntoChapters = (doc) => {
       const clone = range.cloneContents();
       const div = doc.createElement('div');
       div.appendChild(clone);
+
+      let title = '';
+      const chapterHeadings = Array.from(div.querySelectorAll('h1, h2, h3'));
+      if (chapterHeadings.length > 1) {
+        const titles = chapterHeadings.map(h => h.textContent.trim()).filter(Boolean);
+        const filteredTitles = [];
+        for (const t of titles) {
+          // Keep titles short and unique
+          if (t.length < 40 && !filteredTitles.some(ft => ft.includes(t) || t.includes(ft))) {
+            filteredTitles.push(t);
+          }
+        }
+        if (filteredTitles.length > 0) {
+          title = filteredTitles.join(' · ');
+        }
+      }
       
-      let title = currentHeading.getAttribute('data-title') || currentHeading.textContent.trim();
       if (!title) {
-        title = `Chapter ${i + 1}`;
+        title = currentHeading.getAttribute('data-title') || currentHeading.textContent.trim();
+      }
+
+      if (!title) {
+        title = `Chapter ${j + 1}`;
       } else if (title.length > 80) {
         title = title.substring(0, 77) + '...';
       }
@@ -249,7 +353,7 @@ const splitIntoChapters = (doc) => {
     }
   }
 
-  return chapters;
+  return { chapters, tocItems };
 };
 
 const NativeReader = ({ book, onClose, user }) => {
@@ -304,6 +408,7 @@ const NativeReader = ({ book, onClose, user }) => {
   const touchEndX = useRef(0);
   const touchStartY = useRef(0);
   const touchEndY = useRef(0);
+  const swipeNavigatedRef = useRef(false);
 
   const visibleElementIndexRef = useRef(0);
   const isInitialLoadRef = useRef(true);
@@ -396,10 +501,49 @@ const NativeReader = ({ book, onClose, user }) => {
       doc = rawHtmlOrDoc;
     }
     
-    // Split into chapters
-    const splitChaps = splitIntoChapters(doc);
+    // Centralized Image URL Resolution
+    const htmlUrl = book.formats['text/html'] 
+      || book.formats['text/html; charset=utf-8']
+      || book.formats['text/html; charset=us-ascii']
+      || '';
+    
+    let baseUrl = htmlUrl;
+    if (book._source === 'archive' && book._iaIdentifier) {
+      baseUrl = `https://archive.org/download/${book._iaIdentifier}/`;
+    } else if (htmlUrl.includes('gutenberg.org')) {
+      const match = htmlUrl.match(/\/ebooks\/(\d+)/);
+      if (match) {
+        const id = match[1];
+        baseUrl = `https://www.gutenberg.org/cache/epub/${id}/pg${id}-images.html`;
+      } else {
+        const matchCache = htmlUrl.match(/\/cache\/epub\/(\d+)/);
+        if (matchCache) {
+          const id = matchCache[1];
+          baseUrl = `https://www.gutenberg.org/cache/epub/${id}/pg${id}-images.html`;
+        }
+      }
+    }
+    
+    if (baseUrl) {
+      const imgs = doc.querySelectorAll("img");
+      for (const img of Array.from(imgs)) {
+        const src = img.getAttribute("src");
+        if (src && !src.startsWith('http') && !src.startsWith('data:')) {
+          try {
+            const absoluteUrl = new URL(src, baseUrl).href;
+            img.setAttribute("src", absoluteUrl);
+          } catch(e) {
+            console.warn("Relative image resolution error:", e);
+          }
+        }
+      }
+    }
+    
+    // Split into chapters and extract TOC items
+    const { chapters: splitChaps, tocItems: bookToc } = splitIntoChapters(doc);
     if (isMountedRef.current) {
       setChapters(splitChaps);
+      setTocItems(bookToc);
       
       // Determine initial chapter index
       const startChapter = pendingChapterRef.current;
@@ -592,19 +736,6 @@ const NativeReader = ({ book, onClose, user }) => {
       doc.querySelectorAll('style').forEach(el => el.remove());
       doc.querySelectorAll('[style]').forEach(el => el.removeAttribute('style'));
       doc.querySelectorAll('[class]').forEach(el => el.removeAttribute('class'));
-
-      // Gutenberg HTML images are absolute URLs to their CDN.
-      // We resolve relative paths to absolute URLs relative to htmlUrl.
-      const imgs = doc.querySelectorAll("img");
-      for (const img of Array.from(imgs)) {
-        const src = img.getAttribute("src");
-        if (src && !src.startsWith('http') && !src.startsWith('data:')) {
-           try {
-             const absoluteUrl = new URL(src, htmlUrl).href;
-             img.setAttribute("src", absoluteUrl);
-           } catch(e) {}
-         }
-      }
 
       if (signal?.aborted) return;
       processAndSetBook(doc, savedHighlights);
@@ -942,6 +1073,9 @@ const NativeReader = ({ book, onClose, user }) => {
     if (bookHtml && contentRef.current) {
       const injectedImgs = contentRef.current.querySelectorAll('img');
       injectedImgs.forEach(img => {
+        if (img.complete && img.naturalWidth === 0) {
+          img.style.display = 'none';
+        }
         img.onload = () => {
           console.log("Image loaded dynamically, recalculating pages...");
           calculatePages();
@@ -953,7 +1087,7 @@ const NativeReader = ({ book, onClose, user }) => {
         img.style.maxWidth = '100%';
         img.style.maxHeight = '35vh';
         img.style.height = 'auto';
-        img.style.display = 'block';
+        img.style.display = img.style.display === 'none' ? 'none' : 'block';
         img.style.margin = '1.5rem auto';
       });
 
@@ -1265,6 +1399,12 @@ const NativeReader = ({ book, onClose, user }) => {
     }
 
     if (window.getSelection().toString().trim()) return;
+
+    if (swipeNavigatedRef.current) {
+      swipeNavigatedRef.current = false;
+      return;
+    }
+
     const third = window.innerWidth / 3;
     if (e.clientX < third) prev();
     else if (e.clientX > third * 2) next();
@@ -1283,6 +1423,7 @@ const NativeReader = ({ book, onClose, user }) => {
   const handleTouchStart = (e) => {
     touchStartX.current = e.changedTouches[0].clientX;
     touchStartY.current = e.changedTouches[0].clientY;
+    swipeNavigatedRef.current = false;
   };
   
   const handleTouchEnd = (e) => {
@@ -1298,9 +1439,34 @@ const NativeReader = ({ book, onClose, user }) => {
     const diffY = Math.abs(touchEndY.current - touchStartY.current);
     
     if (Math.abs(diffX) > minHorizontal && diffY < maxVertical) {
+      swipeNavigatedRef.current = true;
       if (diffX < 0) next();
       else prev();
+    } else {
+      swipeNavigatedRef.current = false;
     }
+  };
+
+  const handlePrevClick = (e) => {
+    if (e) {
+      e.stopPropagation();
+    }
+    if (swipeNavigatedRef.current) {
+      swipeNavigatedRef.current = false;
+      return;
+    }
+    prev();
+  };
+
+  const handleNextClick = (e) => {
+    if (e) {
+      e.stopPropagation();
+    }
+    if (swipeNavigatedRef.current) {
+      swipeNavigatedRef.current = false;
+      return;
+    }
+    next();
   };
 
   const navigateToElement = (element) => {
@@ -1605,10 +1771,41 @@ const NativeReader = ({ book, onClose, user }) => {
           {!isMobile && (
             <>
               <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
+              {/* Quick Themes Swatches */}
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', margin: '0 4px' }}>
+                {[
+                  { key: 'ivory', bg: '#FAF6EE', fg: '#2E2A24', title: 'Ivory' },
+                  { key: 'sepia', bg: '#F3EAD3', fg: '#4A3B2C', title: 'Sepia' },
+                  { key: 'forest', bg: '#E6ECE4', fg: '#283C2C', title: 'Forest' },
+                  { key: 'slate', bg: '#1F242D', fg: '#E2E6EC', title: 'Slate' },
+                  { key: 'midnight', bg: '#0B0B0F', fg: '#EBEBEE', title: 'Midnight' }
+                ].map(t => (
+                  <button
+                    key={t.key}
+                    onClick={() => setTheme(t.key)}
+                    style={{
+                      width: '20px',
+                      height: '20px',
+                      borderRadius: '50%',
+                      background: t.bg,
+                      border: theme === t.key ? `2px solid ${currentTheme.accent}` : `1px solid rgba(128,128,128,0.4)`,
+                      padding: 0,
+                      cursor: 'pointer',
+                      boxShadow: theme === t.key ? `0 0 6px ${currentTheme.accent}` : 'none',
+                      transition: 'transform 0.15s ease, border-color 0.15s ease',
+                    }}
+                    title={t.title}
+                    onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.15)'}
+                    onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
+                  />
+                ))}
+              </div>
+              <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
               {/* Session time */}
               <span className="mono" style={{ fontSize: '9px', color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
                 {sessionTime > 0 ? `${sessionTime}m` : ''}
               </span>
+              <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
             </>
           )}
           <button onClick={() => { setShowSettings(!showSettings); setShowSearch(false); setShowToc(false); setShowTtsPanel(false); }} style={{ color: showSettings ? currentTheme.accent : 'var(--text-secondary)' }}>
@@ -1936,35 +2133,47 @@ const NativeReader = ({ book, onClose, user }) => {
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
           {/* TOC Tab */}
           {sidebarTab === 'toc' && (
-            chapters.length === 0 ? (
+            tocItems.length === 0 ? (
               <div className="mono" style={{ padding: '24px', opacity: 0.5, fontSize: '10px' }}>NO CHAPTERS FOUND</div>
             ) : (
-              chapters.map((chap, idx) => (
-                <div 
-                  key={idx} 
-                  onClick={() => {
-                    pendingPageRef.current = 0;
-                    setCurrentChapterIndex(idx);
-                    setShowToc(false);
-                  }}
-                  style={{ 
-                    padding: `12px 24px 12px 24px`,
-                    cursor: 'pointer',
-                    fontSize: '14px',
-                    fontFamily: "'Libre Baskerville', serif",
-                    lineHeight: 1.4,
-                    opacity: currentChapterIndex === idx ? 1 : 0.8,
-                    background: currentChapterIndex === idx ? `${currentTheme.accent}12` : 'transparent',
-                    color: currentChapterIndex === idx ? currentTheme.accent : 'inherit',
-                    transition: 'background 0.2s, opacity 0.2s',
-                    borderBottom: `1px solid ${currentTheme.muted}30`
-                  }}
-                  onMouseEnter={e => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = currentTheme.muted; }}
-                  onMouseLeave={e => { e.currentTarget.style.opacity = currentChapterIndex === idx ? 1 : 0.8; e.currentTarget.style.background = currentChapterIndex === idx ? `${currentTheme.accent}12` : 'transparent'; }}
-                >
-                  {chap.title}
-                </div>
-              ))
+              tocItems.map((item, idx) => {
+                const isCurrent = currentChapterIndex === item.chapterIndex;
+                const indent = item.tagName === 'H2' ? '12px' : item.tagName === 'H3' ? '24px' : '0px';
+                return (
+                  <div 
+                    key={idx} 
+                    onClick={() => {
+                      if (item.chapterIndex === currentChapterIndex) {
+                        const target = contentRef.current.querySelector(`#${CSS.escape(item.id)}, [id="${item.id}"]`);
+                        if (target) {
+                          const pageNum = Math.floor(target.offsetLeft / window.innerWidth);
+                          goToPage(pageNum);
+                        }
+                      } else {
+                        pendingAnchorIdRef.current = item.id;
+                        setCurrentChapterIndex(item.chapterIndex);
+                      }
+                      setShowToc(false);
+                    }}
+                    style={{ 
+                      padding: `10px 24px 10px calc(24px + ${indent})`,
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      fontFamily: "'Libre Baskerville', serif",
+                      lineHeight: 1.4,
+                      opacity: isCurrent ? 1 : 0.8,
+                      background: isCurrent ? `${currentTheme.accent}12` : 'transparent',
+                      color: isCurrent ? currentTheme.accent : 'inherit',
+                      transition: 'background 0.2s, opacity 0.2s',
+                      borderBottom: `1px solid ${currentTheme.muted}15`
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = currentTheme.muted; }}
+                    onMouseLeave={e => { e.currentTarget.style.opacity = isCurrent ? 1 : 0.8; e.currentTarget.style.background = isCurrent ? `${currentTheme.accent}12` : 'transparent'; }}
+                  >
+                    {item.title}
+                  </div>
+                );
+              })
             )
           )}
 
@@ -2200,7 +2409,7 @@ const NativeReader = ({ book, onClose, user }) => {
         {/* Left turn zone */}
         <div 
           className="turn-indicator-zone turn-left" 
-          onClick={(e) => { e.stopPropagation(); prev(); }}
+          onClick={handlePrevClick}
           style={{ left: 0 }}
         >
           <ArrowLeft size={20} style={{ opacity: 0 }} className="turn-indicator-icon" />
@@ -2209,11 +2418,92 @@ const NativeReader = ({ book, onClose, user }) => {
         {/* Right turn zone */}
         <div 
           className="turn-indicator-zone turn-right" 
-          onClick={(e) => { e.stopPropagation(); next(); }}
+          onClick={handleNextClick}
           style={{ right: 0 }}
         >
           <ArrowRight size={20} style={{ opacity: 0 }} className="turn-indicator-icon" />
         </div>
+
+        {/* Explicit Floating Navigation Buttons (Desktop) */}
+        {!isMobile && (
+          <>
+            <button
+              onClick={handlePrevClick}
+              style={{
+                position: 'absolute',
+                left: '20px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                width: '44px',
+                height: '44px',
+                borderRadius: '50%',
+                backgroundColor: currentTheme.muted,
+                border: `1px solid rgba(128, 128, 128, 0.2)`,
+                color: currentTheme.color,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                opacity: showControls ? 0.7 : 0,
+                pointerEvents: showControls ? 'all' : 'none',
+                transition: 'opacity 0.3s ease, transform 0.3s ease, background-color 0.2s',
+                zIndex: 80,
+                backdropFilter: 'blur(8px)',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.backgroundColor = `${currentTheme.accent}20`;
+                e.currentTarget.style.borderColor = currentTheme.accent;
+                e.currentTarget.style.opacity = 1;
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.backgroundColor = currentTheme.muted;
+                e.currentTarget.style.borderColor = 'rgba(128, 128, 128, 0.2)';
+                e.currentTarget.style.opacity = showControls ? 0.7 : 0;
+              }}
+              title="Previous Page"
+            >
+              <ArrowLeft size={20} />
+            </button>
+
+            <button
+              onClick={handleNextClick}
+              style={{
+                position: 'absolute',
+                right: '20px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                width: '44px',
+                height: '44px',
+                borderRadius: '50%',
+                backgroundColor: currentTheme.muted,
+                border: `1px solid rgba(128, 128, 128, 0.2)`,
+                color: currentTheme.color,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                opacity: showControls ? 0.7 : 0,
+                pointerEvents: showControls ? 'all' : 'none',
+                transition: 'opacity 0.3s ease, transform 0.3s ease, background-color 0.2s',
+                zIndex: 80,
+                backdropFilter: 'blur(8px)',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.backgroundColor = `${currentTheme.accent}20`;
+                e.currentTarget.style.borderColor = currentTheme.accent;
+                e.currentTarget.style.opacity = 1;
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.backgroundColor = currentTheme.muted;
+                e.currentTarget.style.borderColor = 'rgba(128, 128, 128, 0.2)';
+                e.currentTarget.style.opacity = showControls ? 0.7 : 0;
+              }}
+              title="Next Page"
+            >
+              <ArrowRight size={20} />
+            </button>
+          </>
+        )}
 
         {/* Page numbers */}
         {effectiveSpread ? (
