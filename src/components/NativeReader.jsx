@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { ArrowLeft, ArrowRight, Settings, Maximize, Columns, Square, BookmarkPlus, Edit3, X, List, Search, ChevronUp, ChevronDown, Play, Square as SquareIcon, Volume2, Type, AlignJustify, Minus, Plus } from 'lucide-react';
 import { supabase } from '../supabaseClient';
+import { lockPageScroll, unlockPageScroll } from '../lib/scrollLock';
+import { addDailyMs } from '../lib/readingStats';
 
 const stripGutenbergBoilerplate = (doc) => {
   const textWalker = document.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, null, false);
@@ -56,8 +58,244 @@ const stripGutenbergBoilerplate = (doc) => {
   }
 };
 
+const looksLikeHtml = (text) => {
+  const head = text.slice(0, 500).trimStart().toLowerCase();
+  return head.startsWith('<!doctype html') || head.startsWith('<html');
+};
+
+// OCR'd plain text (Internet Archive dumps) is full of noise: bare page
+// numbers, symbol garble (".'X\"", "S ^T^ ^"), and running headers/footers
+// ("34 CHAPTER IV", "INTRODUCTION 13") that would otherwise be rendered as
+// book content. Filter conservative patterns only — real prose must survive.
+const isOcrJunkLine = (line) => {
+  if (!line) return false;
+  // Bare page number (arabic or roman), optionally decorated
+  if (/^[\s\u2014\u2013_=*·.-]*([0-9]{1,4}|[ivxlcdm]{1,7})[\s\u2014\u2013_=*·.-]*$/i.test(line)) return true;
+  // Line dominated by punctuation/symbols (OCR artifacts)
+  const chars = line.replace(/\s/g, '');
+  if (chars.length === 0) return false;
+  const wordChars = chars.replace(/[^a-zA-Z0-9\u0900-\u097F\u0600-\u06FF\u3040-\u30FF\u4E00-\u9FFF]/g, '');
+  if (wordChars.length / chars.length < 0.5) return true;
+  // Running header with LEADING page number ("34 CHAPTER IV", "XII PREFACE.")
+  if (/^(?:[0-9]{1,4}|[ivxlcdm]{1,7})\s+[A-Z][A-Za-z\s:,'.\-]{2,60}$/.test(line)) return true;
+  // Trailing page number ("INTRODUCTION 13", "PREFACE. xi") — but a leading
+  // structural keyword ("CHAPTER IV") is a real heading, not a header.
+  if (/^(CHAPTER|BOOK|PART|VOLUME|CANTO|ACT|SCENE)\b/i.test(line)) return false;
+  if (/^[A-Za-z][A-Za-z\s:,'.\-]{2,60}\s(?:[0-9]{1,4}|[ivxlcdm]{1,7})$/.test(line)) return true;
+  return false;
+};
+
+// Real chapter divisions — drive the TOC, drop caps and front-matter cutoff.
+const CHAPTER_PATTERNS = [
+  /^(CHAPTER|BOOK|PART|VOLUME|CANTO|STANZA|ACT|SCENE)\b/i,
+  /^(\u0905\u0927\u094d\u092f\u093e\u092f|\u092a\u0930\u093f\u091a\u094d\u091b\u0947\u0926|\u092d\u093e\u0917)(\s|:|\.|$)/, // अध्याय / परिच्छेद / भाग
+  /^[IVXLCDM]{1,8}$/, // a bare roman-numeral line is a chapter number
+];
+const isChapterLine = (line) => CHAPTER_PATTERNS.some((re) => re.test(line));
+
+// "[Illustration: …]" markers (OCR dumps / Gutenberg text) mean a scanned
+// image we cannot show — render them as a muted caption instead of leaking
+// raw markup into the text flow.
+const escapeHtmlText = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// Convert raw plain text (IA OCR dumps, Gutenberg .txt) into book HTML.
+// - Front matter (title page: short centered lines before the first chapter)
+//   is wrapped in <section class="reader-front-matter"> instead of being
+//   scattered across the book as fake headings.
+// - Illustration markers become muted captions in front matter, are dropped
+//   in the body.
+// - Junk OCR lines are filtered; _emphasis_/*strong* markers are applied.
+const textToBookHtml = (rawText) => {
+  const lines = rawText.split('\n');
+  let html = '';
+  let inFrontMatter = true;
+  let paragraph = '';
+  let illustrationOpen = false;
+  let fmLineCount = 0;
+  let consecutiveProseLines = 0;
+  // Front matter lines are buffered so a prose run detected mid-block can
+  // pull its first lines back out of the centered block.
+  let fmBuffer = [];
+  // Scanned IA dumps bury the real title page under pages of OCR noise
+  // (cover-art text, library stamps, sticker labels). A real title page is
+  // short; beyond this cap, stop rendering front matter and drop garbage.
+  const FM_LINE_CAP = 60;
+  // Title-page lines are short, all-caps or decorative; wrapped body prose is
+  // mixed-case with several lowercase words. A run of prose-like lines means
+  // the front matter is over.
+  const isProseLikeLine = (line) => {
+    const words = line.split(/\s+/).filter(Boolean);
+    if (words.length < 4) return false;
+    const lower = words.filter(w => /^[a-z\u0900-\u097F]/.test(w));
+    return lower.length >= 3;
+  };
+
+  const appendLine = (acc, line) => {
+    if (!acc) return line;
+    // OCR wraps words with a line-end hyphen ("distinc-" / "tion") — rejoin
+    // lowercase continuations without the hyphen; keep real compounds.
+    if (/[A-Za-z\u0900-\u097F]-$/.test(acc) && /^[a-z\u0900-\u097F]/.test(line)) {
+      return acc.slice(0, -1) + line;
+    }
+    return acc + ' ' + line;
+  };
+
+  const flushParagraph = (cls = '') => {
+    if (!paragraph.trim()) return;
+    let t = paragraph.trim()
+      .replace(/_([^_]+)_/g, '<em>$1</em>')
+      .replace(/\*([^*]+)\*/g, '<strong>$1</strong>')
+      // Unpaired underscores are OCR emphasis artifacts, not content
+      .replace(/_/g, '');
+    html += `<p${cls ? ` class="${cls}"` : ''}>${t}</p>`;
+    paragraph = '';
+  };
+
+  // Close the buffered section; any accumulated paragraph stays front-matter.
+  // The section is committed BEFORE the pending paragraph, matching the
+  // original line order (buffered lines came first).
+  const closeFrontMatterSection = () => {
+    if (fmBuffer.length > 0) {
+      html += '<section class="reader-front-matter">' + fmBuffer.join('') + '</section>';
+      fmBuffer = [];
+    }
+    flushParagraph('fm-p');
+    inFrontMatter = false;
+  };
+
+  // Exit because real prose started. Pulls the last `proseLinesBack` centered
+  // lines (the start of the prose run) back into a justified body paragraph,
+  // keeping their original order; the remaining buffered title lines commit
+  // as the section BEFORE the prose paragraph.
+  const exitFrontMatterToProse = (proseLinesBack) => {
+    const take = Math.min(proseLinesBack, fmBuffer.length);
+    const pulled = fmBuffer.splice(fmBuffer.length - take, take);
+    if (fmBuffer.length > 0) {
+      html += '<section class="reader-front-matter">' + fmBuffer.join('') + '</section>';
+      fmBuffer = [];
+    }
+    pulled.forEach((last) => {
+      const text = last.replace(/^<div class="fm-line">([\s\S]*)<\/div>$/, '$1')
+        .replace(/<em>/g, '_').replace(/<\/em>/g, '_').replace(/_/g, '');
+      paragraph = appendLine(paragraph, text);
+      fmLineCount--;
+    });
+    flushParagraph('');
+    inFrontMatter = false;
+  };
+
+  const looksLikeOcrGarbage = (line) => {
+    if (isOcrJunkLine(line)) return true;
+    const wordish = line.match(/[A-Za-z\u0900-\u097F]{2,}/g) || [];
+    return wordish.length < 2 && line.length < 25;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    let trimmed = lines[i].trim();
+
+    // Consume multi-line [Illustration: ...] markers
+    if (illustrationOpen) {
+      const endIdx = trimmed.indexOf(']');
+      if (endIdx === -1) continue;
+      illustrationOpen = false;
+      trimmed = trimmed.slice(endIdx + 1).trim();
+      if (!trimmed) continue;
+    }
+    if (/^\[?\s*illustration\b/i.test(trimmed)) {
+      if (trimmed.includes(']')) {
+        const caption = trimmed.replace(/^\[?\s*illustration\b\s*:?\s*/i, '').replace(/\]\s*$/, '').trim();
+        if (inFrontMatter && caption && fmLineCount <= FM_LINE_CAP) fmBuffer.push(`<div class="fm-caption">${escapeHtmlText(caption)}</div>`);
+      } else {
+        illustrationOpen = true;
+      }
+      continue;
+    }
+
+    if (isOcrJunkLine(trimmed)) continue;
+
+    // Front matter ends at the first chapter division, or at the first
+    // substantial prose paragraph (title pages are short lines; a preface
+    // with real paragraphs must not be rendered centered).
+    if (inFrontMatter && (isChapterLine(trimmed) || trimmed.length > 280 || paragraph.length > 280)) {
+      const chapterStart = isChapterLine(trimmed);
+      closeFrontMatterSection();
+      if (chapterStart) {
+        html += `<h2 class="chapter-heading">${escapeHtmlText(trimmed)}</h2>`;
+        continue;
+      }
+      // otherwise fall through: this long line continues as body prose
+    }
+
+    if (inFrontMatter) {
+      if (trimmed === '') { consecutiveProseLines = 0; continue; }
+      if (trimmed.length < 80) {
+        if (isProseLikeLine(trimmed)) {
+          consecutiveProseLines++;
+          if (consecutiveProseLines >= 3) {
+            // Wrapped prose (a preface, an introduction) — pull the two
+            // preceding centered lines back and continue as body text.
+            exitFrontMatterToProse(2);
+            // fall through: this line and the rest flow as body prose
+          }
+        } else {
+          consecutiveProseLines = 0;
+        }
+        if (inFrontMatter) {
+          if (fmLineCount >= FM_LINE_CAP) {
+            if (looksLikeOcrGarbage(trimmed)) continue;
+            closeFrontMatterSection();
+          } else {
+            fmBuffer.push(`<div class="fm-line">${escapeHtmlText(trimmed).replace(/_([^_]{1,60})_/g, '<em>$1</em>').replace(/_/g, '')}</div>`);
+            fmLineCount++;
+            continue;
+          }
+        }
+      } else {
+        paragraph = appendLine(paragraph, trimmed);
+        continue;
+      }
+    }
+
+    // --- Normal body ---
+    if (trimmed === '') {
+      flushParagraph();
+      continue;
+    }
+
+    const isHeading = trimmed.length > 0 && trimmed.length < 80 && (
+      (/[A-Z]/.test(trimmed) && !/[\u0900-\u097F]/.test(trimmed) && trimmed === trimmed.toUpperCase()) ||
+      isChapterLine(trimmed) ||
+      /^(\u0905\u0927\u094d\u092f\u093e\u092f|\u092a\u0930\u093f\u091a\u094d\u091b\u0947\u0926|\u092d\u0942\u092e\u093f\u0915\u093e|\u092a\u094d\u0930\u0938\u094d\u0924\u093e\u0935\u0928\u093e)(\s|:|$)/.test(trimmed)
+    );
+    if (isHeading) {
+      flushParagraph();
+      // Only real chapter divisions become h2 (TOC prominence + drop caps);
+      // other short all-caps lines ("THE END", "EPILOGUE") become h3.
+      const isRealChapter = isChapterLine(trimmed);
+      const tag = isRealChapter ? 'h2' : 'h3';
+      html += `<${tag} class="chapter-heading">${escapeHtmlText(trimmed)}</${tag}>`;
+      continue;
+    }
+
+    paragraph = appendLine(paragraph, trimmed);
+  }
+  flushParagraph();
+  if (inFrontMatter) closeFrontMatterSection(); // books without chapter divisions
+  return html;
+};
+
+// Dev-only Vite proxies (see vite.config.js). In production these paths serve
+// the SPA shell or 404, which looksLikeHtml / !res.ok filters out.
+const devProxyFor = (url) => {
+  if (url.includes('gutenberg.org')) return url.replace(/^https?:\/\/[^/]+/, '/gutenberg');
+  if (url.includes('archive.org')) return url.replace(/^https?:\/\/[^/]+/, '/ia');
+  return null;
+};
+
 const fetchWithProxy = async (url, responseType = 'text', signal = null) => {
+  const devProxy = devProxyFor(url);
   const proxyMakers = [
+    ...(devProxy ? [{ make: () => devProxy, timeout: 20000 }] : []),
     { make: () => `/api/proxy?url=${encodeURIComponent(url)}`, timeout: 25000 },
     { make: () => `https://corsproxy.io/?${encodeURIComponent(url)}`, timeout: 10000 },
     { make: () => url, timeout: 10000 }
@@ -85,8 +323,13 @@ const fetchWithProxy = async (url, responseType = 'text', signal = null) => {
 
       if (!res.ok) continue;
       if (responseType === 'arraybuffer') return await res.arrayBuffer();
-      
+
       const text = await res.text();
+      // Reject HTML shells (SPA fallback / wrong route / error pages) that
+      // would otherwise be parsed as book content.
+      if (responseType === 'text' && looksLikeHtml(text)) {
+        continue;
+      }
       // Check for corsproxy.io pricing/error responses disguised as 200 OK
       if (text.includes("Server-side requests are not allowed") || text.includes("Upgrade at https://corsproxy.io")) {
         console.warn("corsproxy.io pricing limit reached, trying next fallback");
@@ -103,6 +346,41 @@ const fetchWithProxy = async (url, responseType = 'text', signal = null) => {
   throw new Error(`All proxies failed for: ${url}`);
 };
 
+
+// '#RRGGBB' / '#RGB' → rgba(r,g,b,a) for theme-aware gradients
+// Exact character offset of a DOM range within a container's text-node
+// stream — shared by highlight save and bookmark save so both can restore
+// positions that survive font/layout changes (page numbers do not).
+const charOffsetOfRange = (container, rng) => {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+  let offset = 0;
+  let node;
+  while ((node = walker.nextNode())) {
+    if (node === rng.startContainer) return offset + rng.startOffset;
+    offset += node.nodeValue.length;
+  }
+  return -1;
+};
+
+// The deepest element containing a given character offset (inverse of above).
+const elementAtCharOffset = (container, charStart) => {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+  let offset = 0;
+  let node;
+  while ((node = walker.nextNode())) {
+    if (offset + node.nodeValue.length > charStart) return node.parentElement;
+    offset += node.nodeValue.length;
+  }
+  return null;
+};
+
+const hexToRgba = (hex, alpha) => {
+  let h = (hex || '#000000').replace('#', '');
+  if (h.length === 3) h = h.split('').map(c => c + c).join('');
+  const n = parseInt(h, 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
 
 // Font family options
 const FONT_OPTIONS = [
@@ -164,7 +442,58 @@ const copyAnchorIdsToHeadings = (doc) => {
   });
 };
 
+const sanitizeBookDom = (doc) => {
+  doc.querySelectorAll('script, style, link, iframe, form, object, embed, noscript').forEach((el) => el.remove());
+  doc.getElementById('pg-header')?.remove();
+  doc.getElementById('pg-footer')?.remove();
+  stripGutenbergBoilerplate(doc);
+
+  // Strip inline event handlers (onerror/onload/...) and javascript: URLs —
+  // Internet Archive items are user-uploaded and flow into
+  // dangerouslySetInnerHTML, so attribute handlers would execute in-app.
+  doc.querySelectorAll('*').forEach((el) => {
+    for (const attr of [...el.attributes]) {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith('on')) {
+        el.removeAttribute(attr.name);
+      } else if ((name === 'href' || name === 'src' || name === 'xlink:href') && /^\s*javascript:/i.test(attr.value)) {
+        el.removeAttribute(attr.name);
+      }
+    }
+  });
+
+  doc.querySelectorAll('[style]').forEach((el) => el.removeAttribute('style'));
+  // Classes the reader's own typography engine relies on survive; everything
+  // else (upstream Gutenberg/IA styling) is dropped.
+  const PRESERVED_CLASSES = new Set(['chapter-heading', 'has-dropcap', 'reader-front-matter', 'fm-line', 'fm-p', 'fm-caption']);
+  doc.querySelectorAll('[class]').forEach((el) => {
+    const classes = [...el.classList];
+    const kept = classes.filter((c) => PRESERVED_CLASSES.has(c));
+    if (kept.length === classes.length) return;
+    if (kept.length === 0) {
+      el.removeAttribute('class');
+    } else {
+      el.setAttribute('class', kept.join(' '));
+    }
+  });
+
+  ['font', 'center'].forEach((tag) => {
+    doc.querySelectorAll(tag).forEach((el) => {
+      const parent = el.parentNode;
+      if (!parent) return;
+      while (el.firstChild) parent.insertBefore(el.firstChild, el);
+      parent.removeChild(el);
+    });
+  });
+
+  doc.querySelectorAll('p, div, span, h1, h2, h3, h4, h5, h6, blockquote').forEach((el) => {
+    const empty = !el.textContent.replace(/\u00a0/g, ' ').trim() && !el.querySelector('img, table, hr');
+    if (empty) el.remove();
+  });
+};
+
 const splitIntoChapters = (doc) => {
+  sanitizeBookDom(doc);
   copyAnchorIdsToHeadings(doc);
 
   // Ensure all h1, h2, h3 have IDs (if they don't, generate one)
@@ -208,7 +537,7 @@ const splitIntoChapters = (doc) => {
       // Remove other headings that might be nested or in between
       clone.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h => h.remove());
       const text = clone.textContent.trim();
-      if (text.length > 150 || clone.querySelector('img, table, iframe')) {
+      if (text.length > 280 || clone.querySelector('img, table, iframe')) {
         return true;
       }
     } catch (e) {
@@ -353,12 +682,32 @@ const splitIntoChapters = (doc) => {
     }
   }
 
-  return { chapters, tocItems };
+  const merged = [];
+  const remap = [];
+  for (let i = 0; i < chapters.length; i++) {
+    const ch = chapters[i];
+    const len = ch.html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().length;
+    if (merged.length > 0 && len < 140) {
+      merged[merged.length - 1].html += ch.html;
+      remap[i] = merged.length - 1;
+    } else {
+      remap[i] = merged.length;
+      merged.push({ ...ch });
+    }
+  }
+
+  const remappedToc = tocItems.map((t) => ({
+    ...t,
+    chapterIndex: remap[t.chapterIndex] ?? t.chapterIndex,
+  }));
+
+  return { chapters: merged.length ? merged : chapters, tocItems: remappedToc };
 };
 
 const NativeReader = ({ book, onClose, user }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [bookHtml, setBookHtml] = useState('');
   
   const [chapters, setChapters] = useState([]);
@@ -368,6 +717,7 @@ const NativeReader = ({ book, onClose, user }) => {
   const pendingChapterRef = useRef(0);
   const pendingPageRef = useRef(0);
   const pendingAnchorIdRef = useRef(null);
+  const pendingAnchorCharRef = useRef(null);
   const pendingHighlightTextRef = useRef(null);
   
   const prefs = loadReaderPrefs();
@@ -391,6 +741,8 @@ const NativeReader = ({ book, onClose, user }) => {
   const [currentSearchIndex, setCurrentSearchIndex] = useState(-1);
 
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const ttsActiveRef = useRef(false);
+  const ttsTimerRef = useRef(null);
   const [isPaused, setIsPaused] = useState(false);
   const [ttsRate, setTtsRate] = useState(1.0);
   const [ttsVoice, setTtsVoice] = useState(null);
@@ -414,6 +766,13 @@ const NativeReader = ({ book, onClose, user }) => {
   const isInitialLoadRef = useRef(true);
 
   const contentRef = useRef(null);
+  const viewportRef = useRef(null);
+  const pageRef = useRef(0);
+  const totalPagesRef = useRef(1);
+  const isTurningRef = useRef(false);
+  const turnUnlockTimerRef = useRef(null);
+  const calcTimerRef = useRef(null);
+  const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 1200));
   const [totalPages, setTotalPages] = useState(1);
   const [isRecalculating, setIsRecalculating] = useState(false);
 
@@ -428,10 +787,29 @@ const NativeReader = ({ book, onClose, user }) => {
 
   useEffect(() => {
     isMountedRef.current = true;
+    lockPageScroll();
+    document.body.style.cursor = 'auto';
+    document.body.classList.remove('cursor-hover', 'cursor-read', 'cursor-hidden');
     return () => {
       isMountedRef.current = false;
+      unlockPageScroll();
+      // Stop narration when the reader closes — speech used to keep reading
+      // over the catalog after exit.
+      try { window.speechSynthesis?.cancel(); } catch { /* speech unavailable */ }
+      ttsActiveRef.current = false;
+      if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current);
+      if (turnUnlockTimerRef.current) clearTimeout(turnUnlockTimerRef.current);
+      if (calcTimerRef.current) clearTimeout(calcTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
+
+  useEffect(() => {
+    totalPagesRef.current = totalPages;
+  }, [totalPages]);
 
   const updateVisibleElementIndex = useCallback((currentPage) => {
     if (!contentRef.current) return;
@@ -457,16 +835,42 @@ const NativeReader = ({ book, onClose, user }) => {
     }
   }, [page, chapterLoading, isRecalculating, updateVisibleElementIndex]);
 
+  // Chrome visibility: hidden after 5s without input, woken by any pointer
+  // or keyboard activity. Nothing used to set showControls(true) at all —
+  // once the auto-hide fired, the top bar, page arrows and settings were
+  // unreachable until the reader was reopened.
+  const lastActivityRef = useRef(Date.now());
+
   useEffect(() => {
-    if (!showControls) return;
-    if (showToc || showSettings || showSearch || showTtsPanel) return;
+    const wake = () => {
+      lastActivityRef.current = Date.now();
+      setShowControls(true);
+    };
+    window.addEventListener('pointermove', wake, { passive: true });
+    window.addEventListener('pointerdown', wake, { passive: true });
+    window.addEventListener('keydown', wake);
+    return () => {
+      window.removeEventListener('pointermove', wake);
+      window.removeEventListener('pointerdown', wake);
+      window.removeEventListener('keydown', wake);
+    };
+  }, []);
 
-    const timer = setTimeout(() => {
-      setShowControls(false);
-    }, 5000);
+  // Open panels keep the chrome visible.
+  useEffect(() => {
+    if (showToc || showSettings || showSearch || showTtsPanel) {
+      lastActivityRef.current = Date.now();
+      setShowControls(true);
+    }
+  }, [showToc, showSettings, showSearch, showTtsPanel]);
 
-    return () => clearTimeout(timer);
-  }, [showControls, showToc, showSettings, showSearch, showTtsPanel]);
+  useEffect(() => {
+    const iv = setInterval(() => {
+      if (showToc || showSettings || showSearch || showTtsPanel) return;
+      if (Date.now() - lastActivityRef.current >= 5000) setShowControls(false);
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [showToc, showSettings, showSearch, showTtsPanel]);
 
   // Persist reader prefs whenever they change
   useEffect(() => {
@@ -500,7 +904,17 @@ const NativeReader = ({ book, onClose, user }) => {
     } else {
       doc = rawHtmlOrDoc;
     }
-    
+
+    // Drop caps are opt-in: only the paragraph directly after a real chapter
+    // heading (h1/h2), and only when it starts with a letter. Blanket
+    // `h2 + p::first-letter` CSS used to mangle every OCR fragment.
+    doc.querySelectorAll('h1, h2').forEach((h) => {
+      const p = h.nextElementSibling;
+      if (p && p.tagName === 'P' && /^[A-Za-z\u0900-\u097F]/.test((p.textContent || '').trim())) {
+        p.classList.add('has-dropcap');
+      }
+    });
+
     // Centralized Image URL Resolution
     const htmlUrl = book.formats['text/html'] 
       || book.formats['text/html; charset=utf-8']
@@ -539,7 +953,7 @@ const NativeReader = ({ book, onClose, user }) => {
       }
     }
     
-    // Split into chapters and extract TOC items
+    stripGutenbergBoilerplate(doc);
     const { chapters: splitChaps, tocItems: bookToc } = splitIntoChapters(doc);
     if (isMountedRef.current) {
       setChapters(splitChaps);
@@ -602,6 +1016,7 @@ const NativeReader = ({ book, onClose, user }) => {
     const loadBook = async () => {
       if (signal.aborted) return;
       setLoading(true);
+      setError(null);
       const { savedHighlights } = await loadSavedData();
       if (signal.aborted) return;
 
@@ -631,7 +1046,7 @@ const NativeReader = ({ book, onClose, user }) => {
     return () => {
       abortController.abort();
     };
-  }, [book, user]);
+  }, [book, user, reloadNonce]);
 
   // ========== Internet Archive book loader ==========
   const loadIABook = async (identifier, savedHighlights, signal) => {
@@ -676,33 +1091,7 @@ const NativeReader = ({ book, onClose, user }) => {
       const text = await fetchWithProxy(textUrl, 'text', signal);
       if (signal?.aborted) return;
 
-      const lines = text.split('\n');
-      let fullHtml = '';
-      let currentParagraph = '';
-
-      for (const rawLine of lines) {
-        const trimmed = rawLine.trim();
-        if (trimmed.length > 0 && trimmed.length < 80 &&
-            ((trimmed === trimmed.toUpperCase() && /[A-Z\u0900-\u097F]/.test(trimmed)) ||
-            /^(CHAPTER|BOOK|PART|SECTION|VOLUME|\u0905\u0927\u094d\u092f\u093e\u092f|\u092a\u0930\u093f\u091a\u094d\u091b\u0947\u0926)\b/i.test(trimmed))) {
-          if (currentParagraph.trim()) {
-            fullHtml += `<p>${currentParagraph.trim()}</p>`;
-            currentParagraph = '';
-          }
-          fullHtml += `<h2>${trimmed}</h2>`;
-          continue;
-        }
-        if (trimmed === '') {
-          if (currentParagraph.trim()) {
-            fullHtml += `<p>${currentParagraph.trim()}</p>`;
-            currentParagraph = '';
-          }
-          continue;
-        }
-        currentParagraph += (currentParagraph ? ' ' : '') + trimmed;
-      }
-      if (currentParagraph.trim()) fullHtml += `<p>${currentParagraph.trim()}</p>`;
-
+      const fullHtml = textToBookHtml(text);
       processAndSetBook(fullHtml, savedHighlights);
       return;
     }
@@ -778,64 +1167,7 @@ const NativeReader = ({ book, onClose, user }) => {
       }
       cleanedText = cleanedText.trim();
 
-      // Parse plain text into structured HTML
-      const lines = cleanedText.split('\n');
-      let fullHtml = '';
-      let currentParagraph = '';
-      let inParagraph = false;
-      
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trimEnd();
-        const trimmed = line.trim();
-        
-        // Detect chapter/section headings (all caps lines, or lines starting with CHAPTER/BOOK)
-        if (trimmed.length > 0 && trimmed.length < 80 && 
-            ((trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && !/^[0-9\s\.\-_]+$/.test(trimmed)) ||
-            /^(CHAPTER|BOOK|PART|SECTION|VOLUME|अध्याय)\b/i.test(trimmed))) {
-          // Flush current paragraph
-          if (currentParagraph.trim()) {
-            let pText = currentParagraph.trim();
-            pText = pText.replace(/_([^_]+)_/g, '<em>$1</em>');
-            pText = pText.replace(/\*([^\*]+)\*/g, '<strong>$1</strong>');
-            fullHtml += `<p>${pText}</p>`;
-            currentParagraph = '';
-          }
-          const tag = /^(CHAPTER|BOOK|PART|VOLUME|अध्याय)\b/i.test(trimmed) ? 'h2' : 'h3';
-          fullHtml += `<${tag} class="chapter-heading">${trimmed}</${tag}>`;
-          inParagraph = false;
-          continue;
-        }
-        
-        // Empty line = paragraph break
-        if (trimmed === '') {
-          if (currentParagraph.trim()) {
-            let pText = currentParagraph.trim();
-            pText = pText.replace(/_([^_]+)_/g, '<em>$1</em>');
-            pText = pText.replace(/\*([^\*]+)\*/g, '<strong>$1</strong>');
-            fullHtml += `<p>${pText}</p>`;
-            currentParagraph = '';
-          }
-          inParagraph = false;
-          continue;
-        }
-        
-        // Regular text line
-        if (currentParagraph) {
-          currentParagraph += ' ' + trimmed;
-        } else {
-          currentParagraph = trimmed;
-        }
-        inParagraph = true;
-      }
-      
-      // Flush remaining
-      if (currentParagraph.trim()) {
-        let pText = currentParagraph.trim();
-        pText = pText.replace(/_([^_]+)_/g, '<em>$1</em>');
-        pText = pText.replace(/\*([^\*]+)\*/g, '<strong>$1</strong>');
-        fullHtml += `<p>${pText}</p>`;
-      }
-
+      const fullHtml = textToBookHtml(cleanedText);
       const parser = new DOMParser();
       const doc = parser.parseFromString(`<body>${fullHtml}</body>`, "text/html");
       stripGutenbergBoilerplate(doc);
@@ -867,6 +1199,9 @@ const NativeReader = ({ book, onClose, user }) => {
         sessionStartTime.current = Date.now();
         setSessionTime(total);
       }
+      // Every session counts toward the daily goal, however short.
+      addDailyMs(msRead);
+      if (mins > 0 || msRead > 0) sessionStartTime.current = Date.now();
 
       const compositeProgress = currentChapterIndex * 10000 + resolvedPage;
       const totalChaps = chapters.length || 1;
@@ -906,7 +1241,7 @@ const NativeReader = ({ book, onClose, user }) => {
           progressPercent: overallPercent
         };
         localStorage.setItem('archivum_library_metadata', JSON.stringify(libraryMeta));
-      } catch (e) {}
+      } catch { /* storage unavailable */ }
     };
   });
 
@@ -916,99 +1251,104 @@ const NativeReader = ({ book, onClose, user }) => {
     }
   }, []);
 
-  const calculatePages = useCallback(() => {
-    console.log("CALCULATE PAGES CALLED! contentRef.current exists:", !!contentRef.current);
-    if (contentRef.current) {
-      requestAnimationFrame(() => {
-        console.log("RAF running! contentRef.current still exists:", !!contentRef.current);
-        if (!contentRef.current) return;
-        const scrollWidth = contentRef.current.scrollWidth;
-        const viewWidth = window.innerWidth;
-        const pages = Math.max(1, Math.round(scrollWidth / viewWidth));
-        console.log("Calculated pages:", pages, "scrollWidth:", scrollWidth, "viewWidth:", viewWidth, "pendingPage:", pendingPageRef.current);
-        setTotalPages(pages);
-        
-        let targetPage = 0;
-        
-        // Priority 1: Check pending page references (e.g. crossing chapters or initial load)
-        if (pendingPageRef.current === 'last') {
-          targetPage = pages - 1;
-          pendingPageRef.current = 0;
-          isInitialLoadRef.current = false;
-        } else if (isInitialLoadRef.current || (typeof pendingPageRef.current === 'number' && pendingPageRef.current !== 0)) {
-          const startPage = typeof pendingPageRef.current === 'number' ? pendingPageRef.current : 0;
-          targetPage = Math.min(Math.max(startPage, 0), pages - 1);
-          pendingPageRef.current = 0;
-          isInitialLoadRef.current = false;
-        }
-        // Priority 2: Check pending anchor ID
-        else if (pendingAnchorIdRef.current) {
-          const id = pendingAnchorIdRef.current;
-          const target = contentRef.current.querySelector(`#${CSS.escape(id)}, [id="${id}"]`);
-          if (target) {
-            targetPage = Math.floor(target.offsetLeft / viewWidth);
-          }
-          pendingAnchorIdRef.current = null;
-        }
-        // Priority 3: Check pending highlight text search
-        else if (pendingHighlightTextRef.current) {
-          const text = pendingHighlightTextRef.current;
-          const marks = Array.from(contentRef.current.querySelectorAll('mark'));
-          const match = marks.find(m => m.textContent.includes(text));
-          if (match) {
-            targetPage = Math.floor(match.offsetLeft / viewWidth);
-          } else {
-            const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT, null, false);
-            let node;
-            while ((node = walker.nextNode())) {
-              if (node.nodeValue.includes(text)) {
-                const range = document.createRange();
-                range.selectNodeContents(node);
-                const rects = range.getClientRects();
-                if (rects.length > 0) {
-                  targetPage = Math.floor((rects[0].left + (page * viewWidth)) / viewWidth);
-                }
-                break;
-              }
-            }
-          }
-          pendingHighlightTextRef.current = null;
-        }
-        // Priority 4: Restore reading position based on first visible child element index (resize / font-adjust)
-        else {
-          const savedIndexStr = localStorage.getItem(`archivum_visible_index_${book.id}`);
-          const elementIndex = savedIndexStr !== null ? parseInt(savedIndexStr, 10) : visibleElementIndexRef.current;
-          
-          if (elementIndex > 0 && contentRef.current.children[elementIndex]) {
-            const targetChild = contentRef.current.children[elementIndex];
-            targetPage = Math.floor(targetChild.offsetLeft / viewWidth);
-            console.log(`Restored page to ${targetPage} based on visible element index ${elementIndex}`);
-          } else {
-            targetPage = Math.min(Math.max(page, 0), pages - 1);
-          }
-        }
-        
-        targetPage = Math.min(Math.max(targetPage, 0), pages - 1);
-        console.log("Setting page to:", targetPage, "and setChapterLoading(false)");
-        setPage(targetPage);
+  const lockTurn = useCallback(() => {
+    if (isTurningRef.current) return false;
+    isTurningRef.current = true;
+    if (turnUnlockTimerRef.current) clearTimeout(turnUnlockTimerRef.current);
+    turnUnlockTimerRef.current = setTimeout(() => {
+      isTurningRef.current = false;
+    }, 260);
+    return true;
+  }, []);
+
+  const calculatePages = useCallback((mode = 'preserve') => {
+    const run = () => {
+      if (!contentRef.current) {
         setIsRecalculating(false);
         setChapterLoading(false);
-        
-        if (saveDataRef.current) {
-          saveDataRef.current(targetPage, undefined, undefined);
+        return;
+      }
+
+      const viewWidth = viewportRef.current?.clientWidth || window.innerWidth;
+      setPageWidth(viewWidth);
+
+      const scrollWidth = contentRef.current.scrollWidth;
+      const raw = scrollWidth / Math.max(1, viewWidth);
+      const pages = Math.max(1, Math.ceil(raw));
+      setTotalPages(pages);
+      totalPagesRef.current = pages;
+
+      let targetPage = pageRef.current;
+
+      if (pendingPageRef.current === 'last') {
+        targetPage = pages - 1;
+        pendingPageRef.current = null;
+        isInitialLoadRef.current = false;
+      } else if (pendingPageRef.current === 'first') {
+        targetPage = 0;
+        pendingPageRef.current = null;
+        isInitialLoadRef.current = false;
+      } else if (isInitialLoadRef.current || typeof pendingPageRef.current === 'number') {
+        const startPage = typeof pendingPageRef.current === 'number' ? pendingPageRef.current : 0;
+        targetPage = Math.min(Math.max(startPage, 0), pages - 1);
+        pendingPageRef.current = null;
+        isInitialLoadRef.current = false;
+      } else if (pendingAnchorIdRef.current) {
+        const id = pendingAnchorIdRef.current;
+        const target = contentRef.current.querySelector(`#${CSS.escape(id)}, [id="${id}"]`);
+        if (target) targetPage = Math.floor(target.offsetLeft / viewWidth);
+        pendingAnchorIdRef.current = null;
+      } else if (pendingAnchorCharRef.current) {
+        const { charStart } = pendingAnchorCharRef.current;
+        pendingAnchorCharRef.current = null;
+        const target = elementAtCharOffset(contentRef.current, charStart);
+        if (target) targetPage = Math.floor(target.offsetLeft / viewWidth);
+      } else if (pendingHighlightTextRef.current) {
+        const text = pendingHighlightTextRef.current;
+        const marks = Array.from(contentRef.current.querySelectorAll('mark'));
+        const match = marks.find((m) => m.textContent.includes(text));
+        if (match) {
+          targetPage = Math.floor(match.offsetLeft / viewWidth);
         }
-      });
-    } else {
-      console.log("calculatePages: contentRef.current is falsy, setting chapterLoading to false");
+        pendingHighlightTextRef.current = null;
+      } else if (mode === 'restore') {
+        const savedIndexStr = localStorage.getItem(`archivum_visible_index_${book.id}`);
+        const elementIndex = savedIndexStr !== null ? parseInt(savedIndexStr, 10) : visibleElementIndexRef.current;
+        if (elementIndex > 0 && contentRef.current.children[elementIndex]) {
+          const targetChild = contentRef.current.children[elementIndex];
+          targetPage = Math.floor(targetChild.offsetLeft / viewWidth);
+        } else {
+          targetPage = Math.min(Math.max(pageRef.current, 0), pages - 1);
+        }
+      } else {
+        targetPage = Math.min(Math.max(pageRef.current, 0), pages - 1);
+      }
+
+      targetPage = Math.min(Math.max(targetPage, 0), pages - 1);
+      pageRef.current = targetPage;
+      setPage(targetPage);
       setIsRecalculating(false);
       setChapterLoading(false);
-    }
-  }, [book.id, page, chapterLoading]);
+
+      if (saveDataRef.current) {
+        saveDataRef.current(targetPage, undefined, undefined);
+      }
+    };
+
+    // rAF defers measurement until after paint; a timeout fallback settles
+    // chapter loading even in throttled/background tabs where rAF is paused.
+    let ran = false;
+    const once = () => { if (!ran) { ran = true; run(); } };
+    requestAnimationFrame(() => requestAnimationFrame(once));
+    setTimeout(once, 300);
+  }, [book.id]);
 
   const goToPage = (targetPage) => {
-    setPage(targetPage);
+    const clamped = Math.max(0, Math.min(targetPage, Math.max(0, totalPagesRef.current - 1)));
+    pageRef.current = clamped;
+    setPage(clamped);
     if (saveDataRef.current) {
-      saveDataRef.current(targetPage, undefined, undefined);
+      saveDataRef.current(clamped, undefined, undefined);
     }
   };
 
@@ -1031,13 +1371,47 @@ const NativeReader = ({ book, onClose, user }) => {
 
   const restoreHighlights = (container, savedHighlights, chapterIdx) => {
     if (!savedHighlights || savedHighlights.length === 0) return;
-    
+
     const chapterHighlights = savedHighlights.filter(hl => {
       const hlChap = hl.chapterIndex !== undefined ? hl.chapterIndex : 0;
       return hlChap === chapterIdx;
     });
 
     chapterHighlights.forEach(hl => {
+      // New saves carry an exact character offset within the chapter's text
+      // stream, so highlights that crossed element boundaries restore
+      // correctly (the legacy text-search below only worked within a single
+      // text node and silently dropped multi-node selections).
+      if (typeof hl.charStart === 'number' && typeof hl.length === 'number') {
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+        let offset = 0;
+        let node;
+        const spans = [];
+        while ((node = walker.nextNode())) {
+          if (node.parentNode.tagName === 'MARK') continue;
+          const nodeLen = node.nodeValue.length;
+          const start = Math.max(offset, hl.charStart);
+          const end = Math.min(offset + nodeLen, hl.charStart + hl.length);
+          if (end > start && nodeLen > 0) {
+            spans.push({ node, start: start - offset, end: end - offset });
+          }
+          offset += nodeLen;
+          if (offset >= hl.charStart + hl.length) break;
+        }
+        if (spans.length > 0) {
+          spans.forEach(({ node, start, end }) => {
+            if (end - start <= 0) return;
+            const split1 = node.splitText(start);
+            split1.splitText(end - start);
+            const mark = document.createElement('mark');
+            mark.appendChild(split1.cloneNode(true));
+            split1.parentNode.replaceChild(mark, split1);
+          });
+          return;
+        }
+        // fall through to legacy search if the offsets no longer match
+      }
+
       let occurrenceCount = 0;
       const hlText = hl.text;
       const targetIndex = hl.index;
@@ -1046,18 +1420,18 @@ const NativeReader = ({ book, onClose, user }) => {
       let node;
       while ((node = walker.nextNode())) {
         if (node.parentNode.tagName === 'MARK') continue;
-        
+
         const text = node.nodeValue;
         let pos = text.indexOf(hlText);
         while (pos !== -1) {
           if (occurrenceCount === targetIndex) {
             const split1 = node.splitText(pos);
             split1.splitText(hlText.length);
-            
+
             const mark = document.createElement('mark');
             mark.appendChild(split1.cloneNode(true));
             split1.parentNode.replaceChild(mark, split1);
-            
+
             walker.currentNode = mark;
             return;
           }
@@ -1069,32 +1443,28 @@ const NativeReader = ({ book, onClose, user }) => {
   };
 
   useEffect(() => {
-    console.log("bookHtml useEffect triggered! bookHtml length:", bookHtml ? bookHtml.length : 0, "contentRef.current:", !!contentRef.current);
     if (bookHtml && contentRef.current) {
+      const schedulePreserve = () => {
+        if (calcTimerRef.current) clearTimeout(calcTimerRef.current);
+        calcTimerRef.current = setTimeout(() => calculatePages('preserve'), 160);
+      };
+
       const injectedImgs = contentRef.current.querySelectorAll('img');
       injectedImgs.forEach(img => {
         if (img.complete && img.naturalWidth === 0) {
           img.style.display = 'none';
         }
-        img.onload = () => {
-          console.log("Image loaded dynamically, recalculating pages...");
-          calculatePages();
-        };
-        img.onerror = () => { 
-          img.style.display = 'none'; 
-          calculatePages();
+        img.onload = schedulePreserve;
+        img.onerror = () => {
+          img.style.display = 'none';
+          schedulePreserve();
         };
         img.style.maxWidth = '100%';
-        img.style.maxHeight = '35vh';
+        img.style.maxHeight = '38vh';
         img.style.height = 'auto';
         img.style.display = img.style.display === 'none' ? 'none' : 'block';
-        img.style.margin = '1.5rem auto';
+        img.style.margin = '1.25rem auto';
       });
-
-      // APPLY OUR TYPOGRAPHY OVER STRIPPED HTML
-      contentRef.current.style.fontFamily = 'Libre Baskerville, Georgia, serif';
-      contentRef.current.style.fontSize   = '17px';
-      contentRef.current.style.lineHeight = '1.85';
 
       const handleAnchorClick = (e) => {
         const anchor = e.target.closest('a[href^="#"]');
@@ -1130,13 +1500,11 @@ const NativeReader = ({ book, onClose, user }) => {
 
       restoreHighlights(contentRef.current, highlights, currentChapterIndex);
 
-      requestAnimationFrame(() => {
-        setIsRecalculating(true);
-        console.log("Scheduling calculatePages from bookHtml useEffect...");
-        setTimeout(calculatePages, 200);
-      });
+      setIsRecalculating(true);
+      const timer = setTimeout(() => calculatePages(isInitialLoadRef.current ? 'restore' : 'preserve'), 80);
 
       return () => {
+        clearTimeout(timer);
         if (contentRef.current) {
           contentRef.current.removeEventListener('click', handleAnchorClick);
         }
@@ -1145,13 +1513,10 @@ const NativeReader = ({ book, onClose, user }) => {
   }, [bookHtml, highlights, currentChapterIndex, calculatePages]);
 
   useEffect(() => {
-    console.log("loading useEffect triggered! loading:", loading);
-    if (!loading) {
-      setIsRecalculating(true);
-      console.log("Scheduling calculatePages from loading useEffect...");
-      const timer = setTimeout(calculatePages, 200);
-      return () => clearTimeout(timer);
-    }
+    if (loading) return;
+    setIsRecalculating(true);
+    const timer = setTimeout(() => calculatePages('restore'), 80);
+    return () => clearTimeout(timer);
   }, [fontSize, fontFamily, lineHeight, marginSize, spread, loading, calculatePages]);
 
   useEffect(() => {
@@ -1159,7 +1524,7 @@ const NativeReader = ({ book, onClose, user }) => {
     const handleResize = () => {
       setIsRecalculating(true);
       clearTimeout(timer);
-      timer = setTimeout(calculatePages, 200);
+      timer = setTimeout(() => calculatePages('restore'), 160);
     };
     window.addEventListener('resize', handleResize);
     return () => {
@@ -1169,44 +1534,46 @@ const NativeReader = ({ book, onClose, user }) => {
   }, [calculatePages]);
 
   const next = useCallback(() => {
-    if (page < totalPages - 1) {
-      const newPage = page + 1;
+    if (chapterLoading) return;
+    if (!lockTurn()) return;
+    const p = pageRef.current;
+    const tp = totalPagesRef.current;
+    if (p < tp - 1) {
+      const newPage = p + 1;
+      pageRef.current = newPage;
       setPage(newPage);
-      if (saveDataRef.current) {
-        saveDataRef.current(newPage, undefined, undefined);
-      }
+      saveDataRef.current?.(newPage, undefined, undefined);
+    } else if (currentChapterIndex < chapters.length - 1) {
+      isTurningRef.current = false;
+      pendingPageRef.current = 'first';
+      setCurrentChapterIndex((idx) => idx + 1);
     } else {
-      if (currentChapterIndex < chapters.length - 1) {
-        pendingPageRef.current = 0;
-        setCurrentChapterIndex(idx => idx + 1);
-      } else {
-        alert("You've reached the end of the book.");
-      }
+      isTurningRef.current = false;
     }
-  }, [page, totalPages, currentChapterIndex, chapters.length]);
+  }, [chapterLoading, lockTurn, currentChapterIndex, chapters.length]);
 
   const prev = useCallback(() => {
-    if (page > 0) {
-      const newPage = page - 1;
+    if (chapterLoading) return;
+    if (!lockTurn()) return;
+    const p = pageRef.current;
+    if (p > 0) {
+      const newPage = p - 1;
+      pageRef.current = newPage;
       setPage(newPage);
-      if (saveDataRef.current) {
-        saveDataRef.current(newPage, undefined, undefined);
-      }
+      saveDataRef.current?.(newPage, undefined, undefined);
+    } else if (currentChapterIndex > 0) {
+      isTurningRef.current = false;
+      pendingPageRef.current = 'last';
+      setCurrentChapterIndex((idx) => idx - 1);
     } else {
-      if (currentChapterIndex > 0) {
-        pendingPageRef.current = 'last';
-        setCurrentChapterIndex(idx => idx - 1);
-      }
+      isTurningRef.current = false;
     }
-  }, [page, currentChapterIndex]);
+  }, [chapterLoading, lockTurn, currentChapterIndex]);
 
-  useEffect(() => {
-    const handleKey = (e) => {
-      if(e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keyup', handleKey);
-    return () => window.removeEventListener('keyup', handleKey);
-  }, [onClose]);
+  // Escape is handled once, in the keydown handler below, and only exits the
+  // reader when no panel is open — previously a keyup listener closed the
+  // whole reader on the same keypress that was just closing a panel.
+
 
   const getThemeVars = () => {
     switch (theme) {
@@ -1243,34 +1610,9 @@ const NativeReader = ({ book, onClose, user }) => {
   const pad = isMobile ? marginOption.mobile : marginOption.desktop;
   const gap = 2 * pad;
   const numCols = effectiveSpread ? 2 : 1;
-  const colWidthCalc = `calc(${100 / numCols}vw - ${2 * pad}px)`;
+  const colWidthPx = Math.max(120, (pageWidth / numCols) - (2 * pad));
   const activeFontFamily = FONT_OPTIONS.find(f => f.id === fontFamily)?.family || FONT_OPTIONS[0].family;
 
-  const readerCursorRef = useRef(null);
-
-  useEffect(() => {
-    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    if (isTouchDevice || isMobile) return;
-    const handleGlobalMouseMove = (e) => {
-      if (readerCursorRef.current) {
-        readerCursorRef.current.style.left = e.clientX + 'px';
-        readerCursorRef.current.style.top = e.clientY + 'px';
-        if (readerCursorRef.current.style.display === 'none') {
-          readerCursorRef.current.style.display = 'block';
-        }
-      }
-    };
-    document.addEventListener('mousemove', handleGlobalMouseMove);
-    return () => document.removeEventListener('mousemove', handleGlobalMouseMove);
-  }, []);
-
-  useEffect(() => {
-    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    if (isTouchDevice) return;
-    const sysDot = document.getElementById('cursor-dot');
-    if (sysDot) sysDot.style.display = 'none';
-    return () => { if (sysDot) sysDot.style.display = 'block'; };
-  }, []);
 
   const handleMouseUp = (e) => {
     const sel = window.getSelection();
@@ -1312,9 +1654,15 @@ const NativeReader = ({ book, onClose, user }) => {
       pos = range.startContainer.nodeValue.indexOf(text, pos + 1);
     }
 
-    const hlObj = { 
-      text, 
-      index: occurrenceIndex, 
+    // Exact character offset of the selection within the chapter's text-node
+    // stream — lets restoreHighlights re-wrap selections that span multiple
+    // elements (the legacy {text, index} pair only worked within one node).
+    const charStart = charOffsetOfRange(contentRef.current, range);
+
+    const hlObj = {
+      text,
+      index: occurrenceIndex,
+      ...(charStart >= 0 ? { charStart, length: text.length } : {}),
       bookId: book.id,
       chapterIndex: currentChapterIndex
     };
@@ -1347,21 +1695,29 @@ const NativeReader = ({ book, onClose, user }) => {
     } catch(e) {
       console.error("Multi-node highlight error:", e);
     }
-    
+
     window.getSelection().removeAllRanges();
     setSelectionMenu(null);
     saveData(undefined, newHighlights, undefined);
+    // Inserted marks can reflow the columns — re-measure pages (preserving
+    // the current position) once the DOM settles.
+    if (calcTimerRef.current) clearTimeout(calcTimerRef.current);
+    calcTimerRef.current = setTimeout(() => calculatePages('preserve'), 160);
   };
 
   const handleBookmark = () => {
     if (!selectionMenu) return;
-    const { text } = selectionMenu;
+    const { text, range } = selectionMenu;
     const excerpt = text.substring(0, 40) + (text.length > 40 ? '...' : '');
-    const bmObj = { 
+    // Anchor by character offset — a plain page number points somewhere else
+    // after any font-size/margin change.
+    const charStart = range ? charOffsetOfRange(contentRef.current, range) : -1;
+    const bmObj = {
       chapterIndex: currentChapterIndex,
-      page, 
-      excerpt, 
-      time: new Date().toISOString() 
+      page,
+      excerpt,
+      ...(charStart >= 0 ? { charStart, length: text.length } : {}),
+      time: new Date().toISOString()
     };
     const newBookmarks = [...bookmarks, bmObj];
     setBookmarks(newBookmarks);
@@ -1379,7 +1735,7 @@ const NativeReader = ({ book, onClose, user }) => {
       const href = anchor.getAttribute('href');
       if (!href) return;
       if (href.startsWith('http')) {
-        window.open(href, '_blank');
+        window.open(href, '_blank', 'noopener,noreferrer');
         return;
       }
       if (href.startsWith('#')) {
@@ -1404,6 +1760,7 @@ const NativeReader = ({ book, onClose, user }) => {
       swipeNavigatedRef.current = false;
       return;
     }
+    if (isTurningRef.current) return;
 
     const third = window.innerWidth / 3;
     if (e.clientX < third) prev();
@@ -1472,8 +1829,9 @@ const NativeReader = ({ book, onClose, user }) => {
   const navigateToElement = (element) => {
     if (!contentRef.current || !element) return;
     const elemRect = element.getBoundingClientRect();
-    const absoluteLeft = elemRect.left + (page * window.innerWidth);
-    const targetPage = Math.floor(absoluteLeft / window.innerWidth);
+    const width = pageWidth || window.innerWidth;
+    const absoluteLeft = elemRect.left + (page * width);
+    const targetPage = Math.floor(absoluteLeft / width);
     
     setPage(targetPage);
     saveData(targetPage, undefined, undefined);
@@ -1525,29 +1883,35 @@ const NativeReader = ({ book, onClose, user }) => {
     const synth = window.speechSynthesis;
     if (!synth) return;
     synth.cancel();
-    
+
     const text = getVisibleText();
     if (!text) {
       setIsSpeaking(false);
       setIsPaused(false);
       return;
     }
-    
+
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = ttsRate;
     if (ttsVoice) utterance.voice = ttsVoice;
-    utterance.onend = () => { setIsSpeaking(false); setIsPaused(false); };
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      setIsPaused(false);
+      // Auto-advance: keep narrating while the user hasn't stopped TTS.
+      // The page-change effect restarts narration once the slide settles.
+      if (ttsActiveRef.current) next();
+    };
     utterance.onerror = () => { setIsSpeaking(false); setIsPaused(false); };
-    
+
     synth.speak(utterance);
     setIsSpeaking(true);
     setIsPaused(false);
-  }, [ttsRate, ttsVoice, getVisibleText]);
+  }, [ttsRate, ttsVoice, getVisibleText, next]);
 
   const handleTTS = useCallback(() => {
     const synth = window.speechSynthesis;
     if (!synth) return;
-    
+
     if (isSpeaking && !isPaused) {
       synth.pause();
       setIsPaused(true);
@@ -1558,29 +1922,62 @@ const NativeReader = ({ book, onClose, user }) => {
       setIsPaused(false);
       return;
     }
-    
+
+    ttsActiveRef.current = true;
     readCurrentPage();
   }, [isSpeaking, isPaused, readCurrentPage]);
 
-  // Keyboard shortcuts for reader
   useEffect(() => {
     const handler = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-      if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
-      if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
+      if (e.repeat) return;
+      if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); prev(); }
+      if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); next(); }
       if (e.key === ' ' && !e.shiftKey) { e.preventDefault(); handleTTS(); }
       if (e.key === '?' || (e.shiftKey && e.key === '/')) { e.preventDefault(); setShowShortcutsModal(v => !v); }
-      if (e.key === 'Escape') { setShowShortcutsModal(false); setShowTtsPanel(false); }
+      if (e.key === 'Escape') {
+        // Close overlays first; only exit the book when nothing is open.
+        if (showShortcutsModal || showTtsPanel || showToc || showSettings || showSearch || selectionMenu) {
+          setShowShortcutsModal(false);
+          setShowTtsPanel(false);
+          setShowToc(false);
+          setShowSettings(false);
+          setShowSearch(false);
+          setSelectionMenu(null);
+        } else {
+          onClose();
+        }
+      }
       if (e.key === 'f' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setShowSearch(v => !v); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [next, prev, isSpeaking, handleTTS]);
+  }, [next, prev, handleTTS, onClose, showShortcutsModal, showTtsPanel, showToc, showSettings, showSearch, selectionMenu]);
+
+  useEffect(() => {
+    let acc = 0;
+    let wheelLock = 0;
+    const onWheel = (e) => {
+      if (showToc || showSettings || showSearch || showTtsPanel) return;
+      e.preventDefault();
+      const now = Date.now();
+      if (now < wheelLock) return;
+      acc += e.deltaX + e.deltaY;
+      if (Math.abs(acc) < 70) return;
+      wheelLock = now + 280;
+      if (acc > 0) next();
+      else prev();
+      acc = 0;
+    };
+    window.addEventListener('wheel', onWheel, { passive: false });
+    return () => window.removeEventListener('wheel', onWheel);
+  }, [next, prev, showToc, showSettings, showSearch, showTtsPanel]);
 
   const stopTTS = useCallback(() => {
     const synth = window.speechSynthesis;
-    if (!synth) return;
-    synth.cancel();
+    if (synth) synth.cancel();
+    ttsActiveRef.current = false;
+    if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current);
     setIsSpeaking(false);
     setIsPaused(false);
   }, []);
@@ -1599,15 +1996,19 @@ const NativeReader = ({ book, onClose, user }) => {
     saveData(undefined, undefined, newBookmarks);
   };
 
+  // Re-read after a page turn while TTS is active. The delay lets the
+  // 0.22s slide transition finish so getVisibleText() measures the NEW page
+  // (previously it read the tail of the old page plus the head of the new).
   useEffect(() => {
-    const synth = window.speechSynthesis;
-    if (isSpeaking && synth && synth.speaking) {
-      synth.cancel();
-      setTimeout(() => {
-        readCurrentPage();
-      }, 50);
-    }
-  }, [page]);
+    if (!ttsActiveRef.current) return;
+    if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current);
+    ttsTimerRef.current = setTimeout(() => {
+      if (ttsActiveRef.current && isMountedRef.current) readCurrentPage();
+    }, 350);
+    return () => {
+      if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current);
+    };
+  }, [page, readCurrentPage]);
 
   const handleSearch = (e) => {
     e.preventDefault();
@@ -1681,7 +2082,14 @@ const NativeReader = ({ book, onClose, user }) => {
     return (
       <div className="reader-loading">
         <div className="mono text-secondary" style={{ maxWidth: '400px', textAlign: 'center', lineHeight: 1.6 }}>{error}</div>
-        <button className="btn-ghost" onClick={onClose} style={{ marginTop: '16px' }}>BACK TO LIBRARY</button>
+        <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
+          <button
+            className="btn-ghost"
+            onClick={() => { setReloadNonce(n => n + 1); }}
+            style={{ marginTop: '16px' }}
+          >RETRY</button>
+          <button className="btn-ghost" onClick={onClose} style={{ marginTop: '16px' }}>BACK TO LIBRARY</button>
+        </div>
       </div>
     );
   }
@@ -1730,7 +2138,7 @@ const NativeReader = ({ book, onClose, user }) => {
           pointerEvents: showControls ? 'all' : 'none',
           transition: 'opacity 0.3s ease, transform 0.3s ease',
           transform: showControls ? 'translateY(0)' : 'translateY(-10px)',
-          background: 'linear-gradient(to bottom, rgba(6,6,10,0.85), transparent)',
+          background: `linear-gradient(to bottom, ${hexToRgba(currentTheme.bg, 0.85)}, transparent)`,
         }}
       >
         <div style={{ display: 'flex', gap: isMobile ? '12px' : '16px', alignItems: 'center' }}>
@@ -1738,33 +2146,33 @@ const NativeReader = ({ book, onClose, user }) => {
             <ArrowLeft size={16} /> <span className="mono" style={{ fontSize: '10px' }}>{!isMobile && "LIBRARY"}</span>
           </button>
           <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
-          <button onClick={() => { setShowToc(!showToc); setShowSettings(false); setShowTtsPanel(false); setShowSearch(false); }} style={{ color: showToc ? 'var(--ember)' : 'var(--text-secondary)' }}>
+          <button onClick={() => { setShowToc(!showToc); setShowSettings(false); setShowTtsPanel(false); setShowSearch(false); }} aria-label="Table of contents" aria-expanded={showToc} style={{ color: showToc ? 'var(--ember)' : 'var(--text-secondary)' }}>
             <List size={16} />
           </button>
-          <button onClick={() => { 
-            const newState = !showSearch; 
-            setShowSearch(newState); 
+          <button onClick={() => {
+            const newState = !showSearch;
+            setShowSearch(newState);
             setShowToc(false);
             setShowSettings(false);
             setShowTtsPanel(false);
-            if (!newState) clearSearch(); 
-          }} style={{ color: showSearch ? 'var(--ember)' : 'var(--text-secondary)' }}>
+            if (!newState) clearSearch();
+          }} aria-label="Search in book" aria-expanded={showSearch} style={{ color: showSearch ? 'var(--ember)' : 'var(--text-secondary)' }}>
             <Search size={16} />
           </button>
         </div>
 
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
           {/* TTS Controls */}
-          <button onClick={handleTTS} style={{ color: isSpeaking ? currentTheme.accent : 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }} title={isSpeaking ? (isPaused ? 'Resume' : 'Pause') : 'Read aloud'}>
+          <button onClick={handleTTS} aria-label={isSpeaking ? (isPaused ? 'Resume narration' : 'Pause narration') : 'Read aloud'} style={{ color: isSpeaking ? currentTheme.accent : 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }} title={isSpeaking ? (isPaused ? 'Resume' : 'Pause') : 'Read aloud'}>
             {isSpeaking ? (isPaused ? <Play size={16} /> : <SquareIcon size={14} />) : <Volume2 size={16} />}
             {isSpeaking && <span className="mono" style={{ fontSize: '9px' }}>{isPaused ? 'RESUME' : 'PAUSE'}</span>}
           </button>
           {isSpeaking && (
-            <button onClick={stopTTS} style={{ color: 'var(--text-secondary)', display: 'flex', alignItems: 'center' }} title="Stop">
+            <button onClick={stopTTS} aria-label="Stop narration" style={{ color: 'var(--text-secondary)', display: 'flex', alignItems: 'center' }} title="Stop">
               <X size={14} />
             </button>
           )}
-          <button onClick={() => setShowTtsPanel(v => !v)} style={{ color: showTtsPanel ? currentTheme.accent : 'var(--text-secondary)' }} title="TTS settings">
+          <button onClick={() => setShowTtsPanel(v => !v)} aria-label="Narration settings" aria-expanded={showTtsPanel} style={{ color: showTtsPanel ? currentTheme.accent : 'var(--text-secondary)' }} title="TTS settings">
             <Volume2 size={14} style={{ opacity: 0.6 }} />
             <span className="mono" style={{ fontSize: '8px', marginLeft: '2px' }}>{ttsRate}×</span>
           </button>
@@ -1783,9 +2191,11 @@ const NativeReader = ({ book, onClose, user }) => {
                   <button
                     key={t.key}
                     onClick={() => setTheme(t.key)}
+                    aria-label={`${t.title} theme`}
+                    aria-pressed={theme === t.key}
                     style={{
-                      width: '20px',
-                      height: '20px',
+                      width: '28px',
+                      height: '28px',
                       borderRadius: '50%',
                       background: t.bg,
                       border: theme === t.key ? `2px solid ${currentTheme.accent}` : `1px solid rgba(128,128,128,0.4)`,
@@ -1808,7 +2218,7 @@ const NativeReader = ({ book, onClose, user }) => {
               <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
             </>
           )}
-          <button onClick={() => { setShowSettings(!showSettings); setShowSearch(false); setShowToc(false); setShowTtsPanel(false); }} style={{ color: showSettings ? currentTheme.accent : 'var(--text-secondary)' }}>
+          <button onClick={() => { setShowSettings(!showSettings); setShowSearch(false); setShowToc(false); setShowTtsPanel(false); }} aria-label="Reader settings" aria-expanded={showSettings} style={{ color: showSettings ? currentTheme.accent : 'var(--text-secondary)' }}>
             <Settings size={16} />
           </button>
         </div>
@@ -2235,14 +2645,27 @@ const NativeReader = ({ book, onClose, user }) => {
                 return (
                   <div 
                     key={idx}
-                    onClick={() => { 
-                      if (bmChapter === currentChapterIndex) {
+                    onClick={() => {
+                      if (typeof bm.charStart === 'number') {
+                        // Anchor-based: resolve the page from the character
+                        // offset after the chapter content is loaded.
+                        if (bmChapter === currentChapterIndex) {
+                          const target = elementAtCharOffset(contentRef.current, bm.charStart);
+                          if (target) {
+                            goToPage(Math.floor(target.offsetLeft / Math.max(1, pageWidth)));
+                            setShowToc(false);
+                            return;
+                          }
+                        }
+                        pendingAnchorCharRef.current = { charStart: bm.charStart };
+                        setCurrentChapterIndex(bmChapter);
+                      } else if (bmChapter === currentChapterIndex) {
                         goToPage(bm.page);
                       } else {
                         pendingPageRef.current = bm.page;
                         setCurrentChapterIndex(bmChapter);
                       }
-                      setShowToc(false); 
+                      setShowToc(false);
                     }}
                     style={{
                       padding: '14px 20px',
@@ -2355,37 +2778,38 @@ const NativeReader = ({ book, onClose, user }) => {
           </div>
         )}
 
-        {/* BOOK CONTENT — CSS multi-column layout */}
-        <div style={{
-          width: '100vw', height: '100vh', 
-          overflow: 'hidden', position: 'relative',
-        }}>
-          {/* Optional Spine for Spread */}
+        <div
+          ref={viewportRef}
+          style={{
+            width: '100%', height: '100%',
+            overflow: 'hidden', position: 'relative',
+          }}
+        >
           {effectiveSpread && (
             <div className="spread-spine" />
-          )}    
+          )}
 
           <div className={`chapter-loading-overlay ${chapterLoading ? 'active' : ''}`} style={{ background: currentTheme.bg }}>
             <div className="pulsing-ember-dot" />
           </div>
 
-          <div 
+          <div
             className="page-slider"
             style={{
-              transform: `translateX(-${page * 100}vw)`,
-              transition: 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)',
+              transform: `translate3d(-${page * pageWidth}px, 0, 0)`,
+              transition: isRecalculating || chapterLoading ? 'none' : 'transform 0.22s ease-out',
               width: 'max-content',
               height: '100%',
+              willChange: 'transform',
             }}
           >
-            <div 
+            <div
               ref={contentRef}
-              className="reader-content"
+              className="reader-content reader-content-shell"
               style={{
-                width: '100vw',
-                height: 'calc(100vh - 140px)',
+                width: `${pageWidth}px`,
                 marginTop: '70px',
-                columnWidth: colWidthCalc,
+                columnWidth: `${colWidthPx}px`,
                 columnCount: 'auto',
                 columnGap: `${gap}px`,
                 columnFill: 'auto',

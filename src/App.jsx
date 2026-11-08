@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useCallback, useRef, Component } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, Component } from 'react';
 import NativeReader from './components/NativeReader';
 import { Search, ChevronDown, User, Library, BookOpen, Home, Settings, ArrowRight, Command, CornerDownLeft, X, Globe, Filter, Heart, BarChart3, Clock, Flame, BookMarked } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
 import Lenis from 'lenis';
+import { lockPageScroll, unlockPageScroll, scrollToPosition } from './lib/scrollLock';
+import { recordReadingDay, getReadingStreak, getTodayMinutes } from './lib/readingStats';
 
 // ========== ERROR BOUNDARY ==========
 
@@ -91,35 +93,6 @@ const ProgressRing = ({ percent }) => {
 
 const cleanSubject = (sub) => {
   return sub.split('--').map(s => s.trim()).filter(s => s.length > 0 && s.length < 30)[0] || sub.substring(0, 25);
-};
-
-const getReadingStreak = () => {
-  try {
-    const days = JSON.parse(localStorage.getItem('archivum_reading_days') || '[]');
-    const today = new Date().toDateString();
-    const uniqueDays = [...new Set(days)];
-    if (!uniqueDays.includes(today)) return uniqueDays.length > 0 ? uniqueDays.length : 0;
-    let streak = 0;
-    const d = new Date();
-    for (let i = 0; i < 365; i++) {
-      const ds = new Date(d - i * 86400000).toDateString();
-      if (uniqueDays.includes(ds)) streak++;
-      else if (i > 0) break;
-    }
-    return streak;
-  } catch { return 0; }
-};
-
-const recordReadingDay = () => {
-  try {
-    const days = JSON.parse(localStorage.getItem('archivum_reading_days') || '[]');
-    const today = new Date().toDateString();
-    if (!days.includes(today)) {
-      days.push(today);
-      if (days.length > 365) days.shift();
-      localStorage.setItem('archivum_reading_days', JSON.stringify(days));
-    }
-  } catch {}
 };
 
 const getReadingProgress = () => {
@@ -239,7 +212,13 @@ const DynamicCover = ({ book, style, className }) => {
     return () => { isMounted = false; };
   }, [book, coverUrl]);
 
-  const fallback = generateCover(book.title, book.authors?.[0]?.name || 'Unknown', book.id);
+  // Canvas raster + PNG encode per card is expensive — only regenerate when
+  // the book identity actually changes, not on every parent re-render.
+  const coverAuthorName = book.authors?.[0]?.name || 'Unknown';
+  const fallback = useMemo(
+    () => generateCover(book.title, coverAuthorName, book.id),
+    [book.title, coverAuthorName, book.id]
+  );
   const finalSrc = coverUrl && coverUrl !== 'notfound' ? coverUrl : fallback;
 
   return (
@@ -262,12 +241,29 @@ const DynamicCover = ({ book, style, className }) => {
 const IA_SEARCH_URL = 'https://archive.org/advancedsearch.php';
 const IA_COVER_URL = 'https://archive.org/services/img';
 
+// Gutendex (and some IA) names arrive as "Last, First" — flip them for display
+// when the tail actually looks like a personal name. "Giles, Lionel" becomes
+// "Lionel Giles", but "Sun-tzu, 6th cent. B.C" is left untouched.
+const formatAuthorName = (name) => {
+  if (!name || typeof name !== 'string') return name;
+  const parts = name.split(',').map(p => p.trim()).filter(Boolean);
+  if (parts.length !== 2) return name;
+  const [last, first] = parts;
+  const looksLikeName = (s) =>
+    s.length > 1 && s.length < 40 && !/\d/.test(s) &&
+    s.split(/\s+/).length <= 3 &&
+    // eslint-disable-next-line no-misleading-character-class
+    s.split(/\s+/).every(w => /^[A-Z\u00C0-\u024F\u0900-\u097F]/u.test(w));
+  if (!looksLikeName(first)) return name;
+  return `${first} ${last}`;
+};
+
 const normalizeIABook = (doc) => {
   const identifier = doc.identifier;
   const creatorRaw = doc.creator;
   const authorName = Array.isArray(creatorRaw) ? creatorRaw[0] : (creatorRaw || 'Unknown');
   const langRaw = doc.language;
-  const lang = Array.isArray(langRaw) ? langRaw[0] : (langRaw || 'hin');
+  const lang = Array.isArray(langRaw) ? langRaw[0] : (langRaw || 'en');
   const langCode = lang.length <= 3 ? lang.toLowerCase() : (lang.toLowerCase() === 'hindi' ? 'hi' : 'en');
   const subjects = Array.isArray(doc.subject) ? doc.subject : (doc.subject ? [doc.subject] : []);
 
@@ -276,7 +272,7 @@ const normalizeIABook = (doc) => {
     _iaIdentifier: identifier,
     _source: 'archive',
     title: doc.title || 'Untitled',
-    authors: [{ name: authorName }],
+    authors: [{ name: formatAuthorName(authorName) }],
     formats: {
       'image/jpeg': null,
       'application/epub+zip': null,
@@ -298,8 +294,22 @@ const fetchWithTimeout = (url, timeoutMs = 10000) => {
   return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
 };
 
+const looksLikeHtml = (text) => {
+  const head = text.slice(0, 500).trimStart().toLowerCase();
+  return head.startsWith('<!doctype html') || head.startsWith('<html');
+};
+
+// Dev-only Vite proxies (see vite.config.js); in production these fall through.
+const devProxyFor = (url) => {
+  if (url.includes('gutenberg.org')) return url.replace(/^https?:\/\/[^/]+/, '/gutenberg');
+  if (url.includes('archive.org')) return url.replace(/^https?:\/\/[^/]+/, '/ia');
+  return null;
+};
+
 const fetchWithProxy = async (url, responseType = 'json') => {
+  const devProxy = devProxyFor(url);
   const proxyMakers = [
+    ...(devProxy ? [{ make: () => devProxy, timeout: 20000 }] : []),
     { make: () => `/api/proxy?url=${encodeURIComponent(url)}`, timeout: 25000 },
     { make: () => `https://corsproxy.io/?${encodeURIComponent(url)}`, timeout: 10000 },
     { make: () => url, timeout: 10000 }
@@ -313,11 +323,14 @@ const fetchWithProxy = async (url, responseType = 'json') => {
       const res = await fetch(proxyUrl, { signal: controller.signal });
       clearTimeout(timeout);
       if (!res.ok) continue;
+      const text = await res.text();
+      // Reject SPA shells / error pages served with 200 — they would either
+      // fail JSON.parse with a confusing error or be treated as book data.
+      if (looksLikeHtml(text)) continue;
       if (responseType === 'json') {
-        const text = await res.text();
         return JSON.parse(text);
       }
-      return await res.text();
+      return text;
     } catch (e) {
       continue;
     }
@@ -325,12 +338,18 @@ const fetchWithProxy = async (url, responseType = 'json') => {
   throw new Error(`All proxies failed for: ${url}`);
 };
 
+// Escape a raw user term for a Lucene query: strip characters that have query
+// syntax meaning and wrap the remainder as a phrase so it can never inject
+// operators (a malformed query makes advancedsearch return 400 and the
+// catalog silently goes empty).
+const luceneEscape = (term) => term.replace(/["\\+!(){}[\]^~*?:/-]/g, ' ').replace(/\s+/g, ' ').trim();
+
 const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genreFilter = '') => {
   // Filter for actual books: require 'texts' mediatype + book-related collections
   // Exclude known non-book collections (policies, reports, government docs)
   let q = 'mediatype:texts AND (collection:opensource OR collection:books OR collection:gutenberg OR collection:additional_collections)';
   q += ' AND NOT collection:governmentpublications AND NOT collection:usgovernmentdocuments';
-  q += ' AND NOT title:(policy OR "terms of use" OR "privacy policy" OR "annual report" OR "financial statement")';
+  q += ' AND NOT title:(policy OR "terms of use" OR "privacy policy" OR "annual report" OR "financial statement" OR "ebook collection" OR masterdoc OR accident OR "incident report")';
   
   if (langFilter === 'hi') {
     q += ' AND language:(Hindi OR hin)';
@@ -338,14 +357,19 @@ const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genr
     q += ' AND language:(English OR eng OR en)';
   }
   if (searchQuery) {
-    q += ` AND (title:(${searchQuery}) OR creator:(${searchQuery}))`;
+    const sq = luceneEscape(searchQuery);
+    if (sq) q += ` AND (title:("${sq}") OR creator:("${sq}"))`;
   } else {
     // Default: popular Hindi + multilingual literature
     if (!langFilter) q += ' AND language:(Hindi OR hin OR English OR eng)';
+    // Default listing quality gate: require a credited creator so the top of
+    // the catalog isn't dominated by anonymous uploaded documents
+    q += ' AND creator:*';
   }
-  
+
   if (genreFilter) {
-    q += ` AND subject:(${genreFilter})`;
+    const gf = luceneEscape(genreFilter);
+    if (gf) q += ` AND subject:("${gf}")`;
   }
 
   const rows = 20;
@@ -356,10 +380,16 @@ const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genr
   const numFound = data?.response?.numFound || 0;
   
   // Post-filter: remove items that look like non-books
-  const junkPatterns = /policy|terms of (use|service)|privacy|annual report|financial|memorandum|regulation|guideline|compliance/i;
+  const junkPatterns = /policy|terms of (use|service)|privacy|annual report|financial|memorandum|regulation|guideline|compliance|software|firmware|gameboy|nintendo|snes|sega|nes rom|game boy|rom\b|romhack|walkthrough|manual for|driver|user guide|calendar|presentation|slides|dataset|logbook/i;
   const filtered = docs.filter(doc => {
-    const title = doc.title || '';
-    return !junkPatterns.test(title) && title.length > 1;
+    const title = (doc.title || '').toString();
+    if (junkPatterns.test(title)) return false;
+    if (!doc.language || doc.language.length === 0) return false; // uploaded docs rarely declare a language
+    // Titles that are nearly all digits/symbols ("d68", "bn10") are dumps, not books
+    // eslint-disable-next-line no-misleading-character-class
+    const letters = title.toLowerCase().replace(/[^a-z\u0900-\u097f]/gu, '');
+    if (letters.length < 3) return false;
+    return true;
   });
   
   return {
@@ -371,7 +401,9 @@ const fetchIABooks = async (searchQuery = '', pageNum = 1, langFilter = '', genr
 
 const fetchIASearch = async (query) => {
   if (!query.trim()) return [];
-  const url = `${IA_SEARCH_URL}?q=mediatype:texts+AND+(title:(${encodeURIComponent(query)})+OR+creator:(${encodeURIComponent(query)}))&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=language&fl[]=downloads&sort[]=downloads+desc&rows=6&page=1&output=json`;
+  const sq = luceneEscape(query);
+  if (!sq) return [];
+  const url = `${IA_SEARCH_URL}?q=${encodeURIComponent(`mediatype:texts AND (title:("${sq}") OR creator:("${sq}"))`)}&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=language&fl[]=downloads&sort[]=downloads+desc&rows=6&page=1&output=json`;
   const data = await fetchWithProxy(url, 'json');
   return (data?.response?.docs || []).map(normalizeIABook);
 };
@@ -539,7 +571,7 @@ function App() {
   const [authLoading, setAuthLoading] = useState(false);
 
   const loaderRef = useRef(null);
-  const cursorRef = useRef(null);
+  const overlaySearchId = useRef(0);
   const scrollPositionRef = useRef(0);
   const currentFetchId = useRef(0);
   const loadingRef = useRef(false);
@@ -693,48 +725,24 @@ function App() {
     }
     const rows = Object.values(updates);
     if (rows.length > 0) {
-      await supabase.from('reading_progress').upsert(rows, { onConflict: 'user_id,book_id' });
+      // Only clear local data after the cloud upsert is confirmed — if Supabase
+      // is unreachable, misconfigured, or RLS rejects the write, deleting local
+      // keys here would irreversibly destroy the user's reading data.
+      const { error } = await supabase.from('reading_progress').upsert(rows, { onConflict: 'user_id,book_id' });
+      if (error) {
+        console.error('Progress sync failed — keeping local data:', error.message);
+        return;
+      }
       // Clear migrated items
       for (let i = localStorage.length - 1; i >= 0; i--) {
         const key = localStorage.key(i);
         if (key.startsWith('archivum_highlights_') || key.startsWith('archivum_bookmarks_') || key.startsWith('archivum_progress_')) {
+          if (key.startsWith('archivum_progress_percent_')) continue; // never delete the percentage cache
           localStorage.removeItem(key);
         }
       }
     }
   };
-
-  useEffect(() => {
-    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    if (isTouchDevice) {
-      if (cursorRef.current) cursorRef.current.style.display = 'none';
-      return;
-    }
-
-    const handleMouseMove = (e) => {
-      if (cursorRef.current) {
-        cursorRef.current.style.transform = `translate3d(${e.clientX}px, ${e.clientY}px, 0) translate(-50%, -50%)`;
-      }
-    };
-    document.addEventListener('mousemove', handleMouseMove, { passive: true });
-    document.body.style.cursor = 'none';
-
-    // Hover logic
-    const handleMouseOver = (e) => {
-      if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON' || e.target.closest('button')) {
-        document.body.classList.add('cursor-hover');
-      } else {
-        document.body.classList.remove('cursor-hover');
-      }
-    };
-    document.addEventListener('mouseover', handleMouseOver);
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseover', handleMouseOver);
-      document.body.style.cursor = 'auto';
-    };
-  }, []);
 
   const fetchBooks = useCallback(async (isLoadMore = false) => {
     if (isLoadMore && loadingRef.current) return;
@@ -773,7 +781,10 @@ function App() {
         if (langFilter === 'en') gutUrl += `&languages=en`;
         gutPromise = fetchWithTimeout(gutUrl, 10000).then(r => r.json()).then(data => ({
           source: 'gutenberg',
-          results: (data.results || []).filter(b => b && b.title),
+          results: (data.results || []).filter(b => b && b.title).map(b => ({
+            ...b,
+            authors: (b.authors || []).map(a => ({ ...a, name: formatAuthorName(a.name) })),
+          })),
           hasMore: !!data.next,
         })).catch(() => ({ source: 'gutenberg', results: [], hasMore: false }));
       }
@@ -859,8 +870,13 @@ function App() {
     } catch (e) {
       console.error('fetchBooks error:', e);
     } finally {
-      loadingRef.current = false;
-      setLoading(false);
+      // A stale fetch (superseded by a newer filter/search change) must never
+      // release the loading guard — otherwise the IntersectionObserver starts
+      // a second concurrent fetch while the new one is still in flight.
+      if (fetchId === currentFetchId.current) {
+        loadingRef.current = false;
+        setLoading(false);
+      }
     }
   }, [hasMore, page, iaPage, query, genre, langFilter]);
 
@@ -969,7 +985,6 @@ function App() {
     if (view === 'library') fetchLibrary();
   }, [view, fetchLibrary]);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const delayDebounce = setTimeout(() => {
       fetchBooks(false);
@@ -1033,11 +1048,11 @@ function App() {
   // Search overlay handler with caching + parallel search
   const handleOverlaySearch = useCallback(async (q, forceLang = null) => {
     if (!q.trim()) { setSearchResults([]); setLocalSuggestions([]); return; }
-    
+
     // Instant local suggestions
     const activeLang = forceLang !== null ? forceLang : searchLangFilter;
     setLocalSuggestions(getLocalSuggestions(q, activeLang));
-    
+
     // Check cache
     const cacheKey = `${q.toLowerCase().trim()}|${activeLang}`;
     if (searchCache.has(cacheKey)) {
@@ -1045,20 +1060,24 @@ function App() {
       return;
     }
 
+    const searchId = ++overlaySearchId.current;
     setSearchLoading(true);
     try {
       // Parallel search: Gutenberg + Internet Archive
       const fetchers = [];
-      
+
       if (activeLang !== 'hi') {
         fetchers.push(
           fetch(`https://gutendex.com/books/?search=${encodeURIComponent(q)}`)
             .then(r => r.json())
-            .then(data => data.results?.slice(0, 5) || [])
+            .then(data => (data.results?.slice(0, 5) || []).map(b => ({
+              ...b,
+              authors: (b.authors || []).map(a => ({ ...a, name: formatAuthorName(a.name) })),
+            })))
             .catch(() => [])
         );
       }
-      
+
       if (activeLang !== 'en') {
         fetchers.push(
           fetchIASearch(q).catch(() => [])
@@ -1066,8 +1085,11 @@ function App() {
       }
 
       const allResults = await Promise.all(fetchers);
+      // A slow response for an earlier keystroke must never overwrite the
+      // results of the latest one.
+      if (searchId !== overlaySearchId.current) return;
       const merged = allResults.flat();
-      
+
       // Deduplicate
       const seen = new Set();
       const deduped = merged.filter(b => {
@@ -1086,15 +1108,16 @@ function App() {
 
       setSearchResults(deduped);
     } catch { setSearchResults([]); }
-    setSearchLoading(false);
+    if (searchId === overlaySearchId.current) setSearchLoading(false);
   }, [searchLangFilter]);
 
   const openBook = (book) => {
     scrollPositionRef.current = window.scrollY;
-    window.__lenis?.stop();
+    // Lock once per modal lifetime — re-opening over an open modal (e.g.
+    // clicking a card behind the overlay) must not double-lock the counter,
+    // or closeBook can never release the page scroll.
+    if (!selectedBook) lockPageScroll();
     setSelectedBook(book);
-    document.body.style.overflow = 'hidden';
-    document.body.classList.remove('cursor-read');
     setTimeout(() => setDetailAnim(true), 10);
   };
 
@@ -1102,10 +1125,8 @@ function App() {
     setDetailAnim(false);
     setTimeout(() => {
       setSelectedBook(null);
-      document.body.style.overflow = 'auto';
-      window.__lenis?.start();
-      window.scrollTo(0, scrollPositionRef.current);
-      window.__lenis?.scrollTo(scrollPositionRef.current, { immediate: true });
+      unlockPageScroll();
+      scrollToPosition(scrollPositionRef.current, { immediate: true });
     }, 400);
   };
 
@@ -1152,15 +1173,13 @@ function App() {
   if (readerOpen && selectedBook) {
     return (
       <>
-        <div id="cursor-dot" ref={cursorRef}></div>
-        <NativeReader 
+        <NativeReader
           book={selectedBook}
-          onClose={() => { 
-            setReaderOpen(false); 
-            document.body.style.overflow = 'auto'; 
+          onClose={() => {
+            setReaderOpen(false);
             updateOfflineStatus();
             setProgressMap(getReadingProgress());
-          }} 
+          }}
           user={user}
         />
       </>
@@ -1207,8 +1226,7 @@ function App() {
     <div id="app" className="visible">
       <div className="noise-overlay" />
       <div className="ambient-glow" />
-      <div id="cursor-dot" ref={cursorRef}></div>
-      
+
       {/* FLOATING NAV */}
       <div className="floating-nav-wrap">
         <div className={`floating-nav ${navVisible ? 'hidden' : ''}`}>
@@ -1217,7 +1235,7 @@ function App() {
           </div>
           <div style={{ width: '1px', height: '20px', background: 'var(--border)' }} />
           
-          <button className="mono" onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }} style={{ color: view === 'catalog' ? 'var(--text-primary)' : 'var(--text-muted)', transition: 'color 0.2s' }}>CATALOG</button>
+          <button className="mono" onClick={() => { setView('catalog'); scrollToPosition(0, { immediate: false }); }} style={{ color: view === 'catalog' ? 'var(--text-primary)' : 'var(--text-muted)', transition: 'color 0.2s' }}>CATALOG</button>
           <button className="mono" onClick={() => setView('library')} style={{ color: view === 'library' ? 'var(--text-primary)' : 'var(--text-muted)', transition: 'color 0.2s', display: 'flex', alignItems: 'center', gap: '6px' }}><Library size={14}/> LIBRARY</button>
           <button className="mono" onClick={() => setView('saved')} style={{ color: view === 'saved' ? 'var(--text-primary)' : 'var(--text-muted)', transition: 'color 0.2s', display: 'flex', alignItems: 'center', gap: '6px' }}><Heart size={14}/> SAVED {savedBooks.length > 0 && <span style={{ fontSize: '9px', background: 'var(--ember)', color: '#fff', borderRadius: '10px', padding: '1px 5px', lineHeight: 1.2 }}>{savedBooks.length}</span>}</button>
           <button className="mono" onClick={() => setView('stats')} style={{ color: view === 'stats' ? 'var(--text-primary)' : 'var(--text-muted)', transition: 'color 0.2s', display: 'flex', alignItems: 'center', gap: '6px' }}><BarChart3 size={14}/> STATS</button>
@@ -1256,10 +1274,10 @@ function App() {
 
       {/* HERO - Only show in catalog view */}
       {view === 'catalog' && (
-        <section id="hero" style={{ position: 'relative', height: '100vh', overflow: 'hidden', display: 'flex', alignItems: 'center' }}>
+        <section id="hero" style={{ position: 'relative', minHeight: '100dvh', paddingTop: '96px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', alignItems: 'center' }}>
           <div style={{ position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none' }} />
           <motion.div style={{ position: 'absolute', inset: 0, zIndex: 2, pointerEvents: 'none' }}>
-            <div className="mono" style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%) rotate(-90deg)', color: 'var(--text-secondary)', transformOrigin: 'left center' }}>GUTENBERG + INTERNET ARCHIVE</div>
+            <div className="mono hero-side-label">GUTENBERG + INTERNET ARCHIVE</div>
           </motion.div>
           <div className="hero-inner" style={{ position: 'relative', zIndex: 3, width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
             <span className="mono" style={{ color: 'var(--ember)', marginBottom: '20px' }}>// THE FREE LIBRARY</span>
@@ -1275,7 +1293,7 @@ function App() {
               Millions of books from Project Gutenberg & Internet Archive. English, हिन्दी, and more. Free forever.
             </p>
             <div style={{ display: 'flex', gap: '16px', marginBottom: '40px' }}>
-              <MagneticButton className="btn-primary" onClick={() => window.__lenis?.scrollTo(window.innerHeight, { immediate: false }) || window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}>EXPLORE THE CATALOG &rarr;</MagneticButton>
+              <MagneticButton className="btn-primary" onClick={() => scrollToPosition(document.getElementById('main-view')?.offsetTop || window.innerHeight)}>EXPLORE THE CATALOG &rarr;</MagneticButton>
               <MagneticButton className="btn-ghost" onClick={() => setShowSearchOverlay(true)}>SEARCH &nbsp;⌘K</MagneticButton>
             </div>
             {/* Trending Strip */}
@@ -1304,10 +1322,12 @@ function App() {
       )}
 
       {/* MAIN VIEW */}
-      <section id="main-view" style={{ padding: '80px 5vw', minHeight: '100vh', position: 'relative', marginTop: view === 'library' ? '80px' : '0' }}>
+      <section id="main-view" style={{ padding: '80px 5vw', minHeight: '100dvh', position: 'relative', marginTop: view === 'library' ? '80px' : '0' }}>
         <div style={{ marginBottom: '60px' }}>
-          <span className="mono">{view === 'catalog' ? '01 — CATALOG' : '02 — MY LIBRARY'}</span>
-          <h2 className="display" style={{ fontSize: 'clamp(2rem, 4vw, 3.5rem)', margin: '8px 0' }}>{view === 'catalog' ? 'The Archive' : 'Continue Reading'}</h2>
+          <span className="mono">{view === 'catalog' ? '01 — CATALOG' : view === 'stats' ? '03 — STATISTICS' : '02 — MY LIBRARY'}</span>
+          <h2 className="display" style={{ fontSize: 'clamp(2rem, 4vw, 3.5rem)', margin: '8px 0' }}>
+            {view === 'catalog' ? 'The Archive' : view === 'stats' ? 'Reading Stats' : view === 'saved' ? 'Saved Books' : 'Continue Reading'}
+          </h2>
           <span className="mono text-secondary">
             {view === 'catalog' ? `Showing ${books.length} works` : view === 'saved' ? `${savedBooks.length} saved books` : view === 'stats' ? 'Your reading journey' : `${libraryBooks.length} books in progress`}
           </span>
@@ -1327,7 +1347,9 @@ function App() {
             heatmapData.push({ date: ds, active: uniqueDays.has(ds) });
           }
           const goalMinutes = dailyGoal;
-          const todayMinutes = Math.min(goalMinutes, stats.totalMinutes > 0 ? Math.min(goalMinutes, 15) : 0); // approximate
+          // Real minutes read today from the per-day log (the old value was a
+          // lifetime-minutes guess capped at 15, so the ring was always wrong).
+          const todayMinutes = getTodayMinutes();
           const goalPercent = (todayMinutes / goalMinutes) * 100;
           const goalR = 50, goalC = 2 * Math.PI * goalR;
 
@@ -1418,7 +1440,7 @@ function App() {
             <div className="empty-state-icon"><Heart size={32} /></div>
             <h3>No Saved Books Yet</h3>
             <p>Tap the heart icon on any book to save it to your reading list for later.</p>
-            <button className="btn-primary" onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }}>BROWSE THE CATALOG &rarr;</button>
+            <button className="btn-primary" onClick={() => { setView('catalog'); scrollToPosition(0, { immediate: false }); }}>BROWSE THE CATALOG &rarr;</button>
           </div>
         )}
         
@@ -1431,7 +1453,7 @@ function App() {
             <div className="empty-state-icon"><BookOpen size={32} /></div>
             <h3>Your Library is Empty</h3>
             <p>Start reading a book from the catalog and it will appear here so you can pick up right where you left off.</p>
-            <button className="btn-primary" onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }}>DISCOVER YOUR FIRST BOOK &rarr;</button>
+            <button className="btn-primary" onClick={() => { setView('catalog'); scrollToPosition(0, { immediate: false }); }}>DISCOVER YOUR FIRST BOOK &rarr;</button>
           </div>
         )}
         
@@ -1442,7 +1464,7 @@ function App() {
           {loading && books.length === 0 && view === 'catalog' && (
             Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={`sk-${i}`} />)
           )}
-          {(view === 'catalog' ? books : view === 'saved' ? savedBooks : libraryBooks).map(book => {
+          {(view === 'catalog' ? books : view === 'saved' ? savedBooks : view === 'library' ? libraryBooks : []).map(book => {
             let authorName = book.authors?.[0]?.name || 'Unknown';
             const lang = (book.languages?.[0] || 'en').toUpperCase();
             const subjectClean = book.subjects?.[0] ? cleanSubject(book.subjects[0]) : null;
@@ -1456,7 +1478,7 @@ function App() {
                 onClick={() => openBook(book)}
                 style={{
                   background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: '6px',
-                  overflow: 'hidden', cursor: 'none', display: 'flex', flexDirection: 'column',
+                  overflow: 'hidden', cursor: 'pointer', display: 'flex', flexDirection: 'column',
                   transform: selectedBook 
                     ? (selectedBook.id === book.id ? 'scale(1.02)' : 'scale(0.92)') 
                     : 'scale(1) translateY(0)',
@@ -1469,13 +1491,11 @@ function App() {
                   if (selectedBook) return;
                   e.currentTarget.style.transform = 'translateY(-12px) scale(1.02)';
                   e.currentTarget.style.boxShadow = '0 24px 48px rgba(0,0,0,0.55), 0 0 0 1px rgba(224,78,42,0.12)';
-                  document.body.classList.add('cursor-read');
                 }}
                 onMouseLeave={e => {
                   if (selectedBook) return;
                   e.currentTarget.style.transform = 'translateY(0) scale(1)';
                   e.currentTarget.style.boxShadow = 'none';
-                  document.body.classList.remove('cursor-read');
                 }}
               >
                 <div className="card-cover-wrap">
@@ -1495,7 +1515,7 @@ function App() {
                     {subjectClean && <span style={{ color: 'var(--text-muted)', fontSize: '9px' }}>{subjectClean.toUpperCase()}</span>}
                   </div>
                   <h3 className="display" style={{ fontSize: '17px', marginBottom: '4px', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', fontFamily: lang === 'HI' || lang === 'HIN' ? "'Noto Sans Devanagari', 'Playfair Display', serif" : undefined }}>{book.title}</h3>
-                  <div className="mono" style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>{authorName.split(',')[0]}</div>
+                  <div className="mono" style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>{authorName}</div>
                   <div style={{ height: '1px', background: 'var(--border)', margin: 'auto 0 12px' }}></div>
                   <div className="mono" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ transition: 'color 0.3s, letter-spacing 0.3s' }}>READ &rarr;</span>
@@ -1620,9 +1640,9 @@ function App() {
 
       {/* AUTH MODAL */}
       {showAuthModal && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(10px)' }}>
-          <div style={{ position: 'relative', background: 'var(--bg-surface)', padding: '40px', border: '1px solid var(--border)', borderRadius: '8px', width: '100%', maxWidth: '420px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
-            <button onClick={() => setShowAuthModal(false)} style={{ position: 'absolute', top: '16px', right: '16px', fontSize: '24px', color: 'var(--text-secondary)' }}>&times;</button>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(10px)' }} onClick={() => setShowAuthModal(false)}>
+          <div role="dialog" aria-modal="true" aria-label={authMode === 'login' ? 'Sign in' : 'Create account'} style={{ position: 'relative', background: 'var(--bg-surface)', padding: '40px', border: '1px solid var(--border)', borderRadius: '8px', width: '100%', maxWidth: '420px', display: 'flex', flexDirection: 'column', gap: '20px' }} onClick={(e) => e.stopPropagation()}>
+            <button onClick={() => setShowAuthModal(false)} aria-label="Close sign-in dialog" style={{ position: 'absolute', top: '16px', right: '16px', fontSize: '24px', color: 'var(--text-secondary)' }}>&times;</button>
             <h3 className="display" style={{ fontSize: '24px', margin: 0 }}>{authMode === 'login' ? 'Sign In' : 'Create Account'}</h3>
             {authError && <div className="mono" style={{ color: 'var(--ember)', fontSize: '11px' }}>{authError}</div>}
             <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -1665,10 +1685,11 @@ function App() {
                       setQuery(overlayQuery);
                       setView('catalog');
                       setShowSearchOverlay(false);
-                      window.__lenis?.scrollTo(window.innerHeight, { immediate: false }) || window.scrollTo({ top: window.innerHeight, behavior: 'smooth' });
+                      scrollToPosition(document.getElementById('main-view')?.offsetTop || window.innerHeight);
                     }
                   }
                 }}
+                aria-activedescendant={searchResults[activeSearchIndex] ? `search-result-${activeSearchIndex}` : undefined}
               />
               <span className="search-overlay-hint">ESC</span>
             </div>
@@ -1684,7 +1705,7 @@ function App() {
                 </button>
               ))}
             </div>
-            <div className="search-overlay-results">
+            <div className="search-overlay-results" role="listbox" aria-label="Search results">
               {/* Local suggestion chips (instant) */}
               {localSuggestions.length > 0 && overlayQuery && (
                 <div className="search-suggestions">
@@ -1711,6 +1732,9 @@ function App() {
               {!searchLoading && searchResults.map((book, idx) => (
                 <div
                   key={book.id}
+                  id={`search-result-${idx}`}
+                  role="option"
+                  aria-selected={idx === activeSearchIndex}
                   className={`search-result-item ${idx === activeSearchIndex ? 'active' : ''}`}
                   onClick={() => { openBook(book); setShowSearchOverlay(false); }}
                   onMouseEnter={() => setActiveSearchIndex(idx)}
@@ -1813,16 +1837,16 @@ function App() {
           </div>
           <div className="footer-col">
             <h4>Collections</h4>
-            <button onClick={() => { setGenre('fiction'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Fiction</button>
-            <button onClick={() => { setGenre('philosophy'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Philosophy</button>
-            <button onClick={() => { setGenre('poetry'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Poetry</button>
-            <button onClick={() => { setGenre('drama'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Drama</button>
+            <button onClick={() => { setGenre('fiction'); setView('catalog'); scrollToPosition(document.getElementById('main-view')?.offsetTop || window.innerHeight); }}>Fiction</button>
+            <button onClick={() => { setGenre('philosophy'); setView('catalog'); scrollToPosition(document.getElementById('main-view')?.offsetTop || window.innerHeight); }}>Philosophy</button>
+            <button onClick={() => { setGenre('poetry'); setView('catalog'); scrollToPosition(document.getElementById('main-view')?.offsetTop || window.innerHeight); }}>Poetry</button>
+            <button onClick={() => { setGenre('drama'); setView('catalog'); scrollToPosition(document.getElementById('main-view')?.offsetTop || window.innerHeight); }}>Drama</button>
           </div>
           <div className="footer-col">
             <h4>Discover</h4>
-            <button onClick={() => { setGenre('history'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>History</button>
-            <button onClick={() => { setGenre('science'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Science</button>
-            <button onClick={() => { setGenre('adventure'); setView('catalog'); window.__lenis?.scrollTo(window.innerHeight) || window.scrollTo(0, window.innerHeight); }}>Adventure</button>
+            <button onClick={() => { setGenre('history'); setView('catalog'); scrollToPosition(document.getElementById('main-view')?.offsetTop || window.innerHeight); }}>History</button>
+            <button onClick={() => { setGenre('science'); setView('catalog'); scrollToPosition(document.getElementById('main-view')?.offsetTop || window.innerHeight); }}>Science</button>
+            <button onClick={() => { setGenre('adventure'); setView('catalog'); scrollToPosition(document.getElementById('main-view')?.offsetTop || window.innerHeight); }}>Adventure</button>
             <button onClick={() => setShowSearchOverlay(true)}>Search All</button>
           </div>
           <div className="footer-col">
@@ -1840,7 +1864,7 @@ function App() {
 
       {/* MOBILE BOTTOM NAV */}
       <nav className="mobile-bottom-nav">
-        <button className={`mobile-nav-item ${view === 'catalog' ? 'active' : ''}`} onClick={() => { setView('catalog'); window.__lenis?.scrollTo(0, { immediate: false }) || window.scrollTo(0, 0); }}>
+        <button className={`mobile-nav-item ${view === 'catalog' ? 'active' : ''}`} onClick={() => { setView('catalog'); scrollToPosition(0, { immediate: false }); }}>
           <Home size={20} />
           <span>Home</span>
         </button>

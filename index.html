@@ -18,7 +18,9 @@
   <div id="root"></div>
   <script type="module" src="/src/main.jsx"></script>
   <script>
-    if ('serviceWorker' in navigator) {
+    // Register the offline service worker only in production builds — in dev
+    // its cache-first strategy pins stale modules and API responses forever.
+    if ('serviceWorker' in navigator && !['localhost', '127.0.0.1'].includes(location.hostname)) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('/sw.js').catch(err => {
           console.log('SW registration failed: ', err);

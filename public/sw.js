@@ -42,7 +42,12 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       caches.open('archivum-data-v1').then((cache) => {
         return fetch(event.request).then((response) => {
-          cache.put(event.request, response.clone());
+          // Only persist successful, real content — caching a transient 429/5xx
+          // or an error page would overwrite the last good copy and get served
+          // offline until the entry is manually evicted.
+          if (response.ok) {
+            cache.put(event.request, response.clone());
+          }
           return response;
         }).catch(() => {
           return cache.match(event.request);
