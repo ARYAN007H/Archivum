@@ -27,3 +27,6 @@ dist-ssr
 # Test artifacts / local
 __pycache__/
 gui-test-screenshots/
+
+# Supabase CLI local state
+supabase/.temp/

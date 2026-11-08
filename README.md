@@ -135,6 +135,8 @@ Internet Archive scans arrive as noisy OCR; the reader's formatting pipeline (ju
    VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
    ```
 
+   > **Keep-alive:** Free-tier Supabase projects pause after 7 days without database activity. The scheduled workflow in `.github/workflows/supabase-keepalive.yml` queries the `keepalive` table every 6 hours. Add `SUPABASE_URL` and `SUPABASE_ANON_KEY` as repository secrets (Settings → Secrets and variables → Actions) to enable it; it can also be run manually from the Actions tab. Note that GitHub disables scheduled workflows in public repositories after 60 days without repository activity, so an external cron/uptime monitor is a sensible backup if the repo will be dormant.
+
 4. **Start Dev Server**
    Run the Vite development server in the root directory:
    ```bash

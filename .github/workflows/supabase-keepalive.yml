@@ -1,0 +1,56 @@
+name: Supabase keep-alive
+
+on:
+  schedule:
+    # Every 6 hours. Supabase looks for a few database queries per day, and
+    # repeated runs add headroom if GitHub delays a scheduled job.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: supabase-keep-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    name: Ping Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query keepalive table via REST API
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_ANON_KEY:-}" ]]; then
+            echo "::error::Missing SUPABASE_URL or SUPABASE_ANON_KEY repository secret."
+            exit 1
+          fi
+
+          endpoint="${SUPABASE_URL%/}/rest/v1/keepalive?select=id&limit=1"
+          body_file="$(mktemp)"
+
+          status="$(curl \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            --max-time 30 \
+            --output "${body_file}" \
+            --write-out '%{http_code}' \
+            --header "apikey: ${SUPABASE_ANON_KEY}" \
+            --header "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            "${endpoint}")"
+
+          echo "HTTP ${status} from ${SUPABASE_URL}/rest/v1/keepalive"
+
+          if [[ "${status}" != 2* ]]; then
+            cat "${body_file}" || true
+            echo "::error::Supabase keep-alive ping failed with HTTP ${status}."
+            exit 1
+          fi
