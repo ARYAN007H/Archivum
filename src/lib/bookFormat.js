@@ -96,6 +96,8 @@ export const textToBookHtml = (rawText, aiHints = null) => {
   let paragraphParts = [];
   let paragraphLen = 0;
   let illustrationOpen = false;
+  // Multi-line [Footnote …] consumption (bracket-balanced)
+  let footnoteLines = null;
   let fmLineCount = 0;
   let consecutiveProseLines = 0;
   // Front matter lines are buffered so a prose run detected mid-block can
@@ -291,6 +293,47 @@ export const textToBookHtml = (rawText, aiHints = null) => {
         if (inFrontMatter && caption && fmLineCount <= FM_LINE_CAP) fmBuffer.push(`<div class="fm-caption">${escapeHtmlText(caption)}</div>`);
       } else {
         illustrationOpen = true;
+      }
+      continue;
+    }
+
+    // [Footnote 4: …] markers — often multi-line with nested brackets
+    // ("[c. 31,]"), so consume until the bracket count balances, then emit
+    // the note as small print after the current paragraph. Handled BEFORE
+    // the junk filter, which would otherwise eat footnote fragments.
+    if (footnoteLines) {
+      footnoteLines.push(trimmed);
+      const joined = footnoteLines.join(' ');
+      const open = (joined.match(/\[/g) || []).length;
+      const close = (joined.match(/\]/g) || []).length;
+      if (open > 0 && open === close) {
+        flushParagraph();
+        const note = joined
+          .replace(/^\[?\s*footnote\s*:?\s*/i, '')
+          .replace(/\]\s*$/, '')
+          .replace(/\s*\(return\)\s*/gi, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        html += `<div class="footnote">${escapeHtmlText(note)}</div>`;
+        footnoteLines = null;
+      }
+      continue;
+    }
+    if (/^\[\s*footnote\b/i.test(trimmed)) {
+      const joined = trimmed;
+      const open = (joined.match(/\[/g) || []).length;
+      const close = (joined.match(/\]/g) || []).length;
+      if (open > 0 && open === close) {
+        flushParagraph();
+        const note = joined
+          .replace(/^\[?\s*footnote\s*:?\s*/i, '')
+          .replace(/\]\s*$/, '')
+          .replace(/\s*\(return\)\s*/gi, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        html += `<div class="footnote">${escapeHtmlText(note)}</div>`;
+      } else {
+        footnoteLines = [trimmed];
       }
       continue;
     }

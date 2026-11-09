@@ -1504,6 +1504,27 @@ button {
   line-height: 1.6;
 }
 
+/* Footnotes ([Footnote 4: …] markers from Gutenberg/OCR sources): rendered
+   as small print after the paragraph they annotate — in-flow, visually
+   recessive, no popovers. */
+.reader-content .footnote {
+  font-size: 0.8em;
+  line-height: 1.55;
+  opacity: 0.72;
+  margin: 0.45em 0 0.45em 1.4em;
+  padding-left: 0.8em;
+  border-left: 2px solid currentColor;
+  text-indent: 0;
+  text-align: left;
+  break-inside: avoid;
+}
+
+/* Read-along: the sentence currently being narrated (CSS Custom Highlight
+   API — ranges over the live DOM, no wrapping elements). */
+::highlight(tts-readalong) {
+  background-color: rgba(224, 78, 42, 0.32);
+}
+
 /* OpenDyslexic — accessibility typeface, only fetched when the reader's
    Dyslexic font option is selected (font-display: swap keeps first paint
    instant on the fallback). */

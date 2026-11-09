@@ -206,7 +206,7 @@ const sanitizeBookDom = (doc) => {
   doc.querySelectorAll('[style]').forEach((el) => el.removeAttribute('style'));
   // Classes the reader's own typography engine relies on survive; everything
   // else (upstream Gutenberg/IA styling) is dropped.
-  const PRESERVED_CLASSES = new Set(['chapter-heading', 'has-dropcap', 'reader-front-matter', 'fm-line', 'fm-p', 'fm-caption', 'dialogue', 'speaker', 'verse', 'verse-line']);
+  const PRESERVED_CLASSES = new Set(['chapter-heading', 'has-dropcap', 'reader-front-matter', 'fm-line', 'fm-p', 'fm-caption', 'dialogue', 'speaker', 'verse', 'verse-line', 'footnote']);
   doc.querySelectorAll('[class]').forEach((el) => {
     const classes = [...el.classList];
     const kept = classes.filter((c) => PRESERVED_CLASSES.has(c));
@@ -581,6 +581,7 @@ const NativeReader = ({ book, onClose, user }) => {
       // Stop narration when the reader closes — speech used to keep reading
       // over the catalog after exit.
       try { window.speechSynthesis?.cancel(); } catch { /* speech unavailable */ }
+      try { window.CSS?.highlights?.delete('tts-readalong'); } catch { /* unsupported */ }
       ttsActiveRef.current = false;
       if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current);
       if (turnUnlockTimerRef.current) clearTimeout(turnUnlockTimerRef.current);
@@ -1831,34 +1832,93 @@ const NativeReader = ({ book, onClose, user }) => {
     setCurrentSearchIndex(-1);
   };
 
-  const getVisibleText = useCallback(() => {
-    if (!contentRef.current) return '';
+  const collectVisibleTextNodes = useCallback(() => {
+    if (!contentRef.current) return [];
     const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT, null, false);
+    const nodes = [];
     let node;
-    let text = '';
     while ((node = walker.nextNode())) {
       if (!node.nodeValue.trim()) continue;
       const range = document.createRange();
       range.selectNodeContents(node);
       const rects = range.getClientRects();
-      if (rects.length > 0) {
-        let isVisible = false;
-        for (let i = 0; i < rects.length; i++) {
-          if (rects[i].right > 0 && rects[i].left < window.innerWidth) {
-            isVisible = true;
-            break;
-          }
+      let isVisible = false;
+      for (let i = 0; i < rects.length; i++) {
+        if (rects[i].right > 0 && rects[i].left < window.innerWidth) {
+          isVisible = true;
+          break;
         }
-        if (isVisible) text += node.nodeValue + ' ';
       }
+      if (isVisible) nodes.push(node);
     }
-    return text.replace(/\s+/g, ' ').trim();
+    return nodes;
   }, [page]);
+
+  const getVisibleText = useCallback(() => {
+    return collectVisibleTextNodes()
+      .map(n => n.nodeValue)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }, [collectVisibleTextNodes]);
+
+  // ---- Read-along: sentence-level TTS with the CSS Custom Highlight API ----
+  // The spoken sentence is highlighted via ::highlight(tts-readalong) using
+  // Ranges only — the DOM stays untouched, so every char-offset anchor
+  // (highlights, bookmarks, position sync) is unaffected. Unsupported
+  // browsers fall back to the whole-page utterance.
+  const clearTtsHighlight = useCallback(() => {
+    try { window.CSS?.highlights?.delete('tts-readalong'); } catch { /* unsupported */ }
+  }, []);
+
+  const stopTTS = useCallback(() => {
+    const synth = window.speechSynthesis;
+    if (synth) synth.cancel();
+    clearTtsHighlight();
+    ttsActiveRef.current = false;
+    if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current);
+    setIsSpeaking(false);
+    setIsPaused(false);
+  }, [clearTtsHighlight]);
+
+  const buildSentenceRanges = useCallback(() => {
+    if (!window.Highlight || !window.CSS?.highlights) return null;
+    const nodes = collectVisibleTextNodes();
+    if (!nodes.length) return null;
+    let full = '';
+    const marks = nodes.map((node) => {
+      const mark = { node, start: full.length };
+      full += node.nodeValue + ' ';
+      return mark;
+    });
+    const sentenceRe = /[^.!?…]*[.!?…]+["'”’)\]]*\s*|[^.!?…]+$/g;
+    const ranges = [];
+    let m;
+    while ((m = sentenceRe.exec(full))) {
+      const s = m.index;
+      const e = s + m[0].length;
+      if (!full.slice(s, e).trim()) continue;
+      const rg = document.createRange();
+      let placed = false;
+      for (const { node, start } of marks) {
+        const ne = start + node.nodeValue.length;
+        if (ne <= s || start >= e) continue;
+        if (!placed) {
+          rg.setStart(node, Math.max(0, s - start));
+          placed = true;
+        }
+        rg.setEnd(node, Math.min(node.nodeValue.length, e - start));
+      }
+      if (placed) ranges.push({ range: rg, text: full.slice(s, e).trim() });
+    }
+    return ranges.length ? ranges : null;
+  }, [collectVisibleTextNodes]);
 
   const readCurrentPage = useCallback(() => {
     const synth = window.speechSynthesis;
     if (!synth) return;
     synth.cancel();
+    clearTtsHighlight();
 
     const text = getVisibleText();
     if (!text) {
@@ -1867,22 +1927,67 @@ const NativeReader = ({ book, onClose, user }) => {
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = ttsRate;
-    if (ttsVoice) utterance.voice = ttsVoice;
-    utterance.onend = () => {
-      setIsSpeaking(false);
+    const sentences = buildSentenceRanges();
+    if (!sentences) {
+      // Highlight API unsupported — narrate the whole page in one utterance.
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = ttsRate;
+      if (ttsVoice) utterance.voice = ttsVoice;
+      utterance.onend = () => {
+        setIsSpeaking(false);
+        setIsPaused(false);
+        if (ttsActiveRef.current) next();
+      };
+      utterance.onerror = () => { setIsSpeaking(false); setIsPaused(false); };
+      synth.speak(utterance);
+      setIsSpeaking(true);
       setIsPaused(false);
-      // Auto-advance: keep narrating while the user hasn't stopped TTS.
-      // The page-change effect restarts narration once the slide settles.
-      if (ttsActiveRef.current) next();
-    };
-    utterance.onerror = () => { setIsSpeaking(false); setIsPaused(false); };
+      return;
+    }
 
-    synth.speak(utterance);
+    // Sentence queue: highlight the current sentence while it narrates, then
+    // advance. Persistent speech failure (e.g. no voices installed) stops
+    // read-along instead of flipping pages forever.
+    let idx = 0;
+    let consecutiveErrors = 0;
+    const speakNext = () => {
+      if (!ttsActiveRef.current) { clearTtsHighlight(); return; }
+      if (idx >= sentences.length) {
+        clearTtsHighlight();
+        setIsSpeaking(false);
+        setIsPaused(false);
+        // Auto-advance: keep narrating while the user hasn't stopped TTS.
+        // The page-change effect restarts narration once the slide settles.
+        next();
+        return;
+      }
+      const { range, text: sentence } = sentences[idx];
+      const u = new SpeechSynthesisUtterance(sentence);
+      u.rate = ttsRate;
+      if (ttsVoice) u.voice = ttsVoice;
+      u.onstart = () => {
+        consecutiveErrors = 0;
+        if (!ttsActiveRef.current) return;
+        try { window.CSS.highlights.set('tts-readalong', new Highlight(range)); } catch { /* unsupported */ }
+        setIsSpeaking(true);
+        setIsPaused(false);
+      };
+      u.onend = () => { idx += 1; speakNext(); };
+      u.onerror = () => {
+        consecutiveErrors += 1;
+        if (consecutiveErrors > 5) {
+          stopTTS();
+          return;
+        }
+        idx += 1;
+        speakNext();
+      };
+      synth.speak(u);
+    };
+    speakNext();
     setIsSpeaking(true);
     setIsPaused(false);
-  }, [ttsRate, ttsVoice, getVisibleText, next]);
+  }, [ttsRate, ttsVoice, getVisibleText, next, clearTtsHighlight, buildSentenceRanges, stopTTS]);
 
   const handleTTS = useCallback(() => {
     const synth = window.speechSynthesis;
@@ -1949,14 +2054,6 @@ const NativeReader = ({ book, onClose, user }) => {
     return () => window.removeEventListener('wheel', onWheel);
   }, [next, prev, showToc, showSettings, showSearch, showTtsPanel]);
 
-  const stopTTS = useCallback(() => {
-    const synth = window.speechSynthesis;
-    if (synth) synth.cancel();
-    ttsActiveRef.current = false;
-    if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current);
-    setIsSpeaking(false);
-    setIsPaused(false);
-  }, []);
 
   // Delete a highlight
   const deleteHighlight = (idx) => {
