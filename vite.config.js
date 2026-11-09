@@ -31,6 +31,7 @@ const sourceProxyPlugin = () => ({
     };
     server.middlewares.use('/gutenberg', proxySource('/gutenberg', 'https://www.gutenberg.org'));
     server.middlewares.use('/ia', proxySource('/ia', 'https://archive.org'));
+    server.middlewares.use('/se', proxySource('/se', 'https://standardebooks.org'));
   },
 });
 

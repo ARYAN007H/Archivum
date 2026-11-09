@@ -6,8 +6,8 @@ const DB_NAME = 'archivum-books';
 const STORE = 'texts';
 const DB_VERSION = 1;
 // Bump when the fetch/format pipeline changes in a way that invalidates
-// previously cached payloads.
-const PAYLOAD_VERSION = 2;
+// previously cached payloads (v3: retrained line-classifier model).
+const PAYLOAD_VERSION = 3;
 
 let dbPromise = null;
 const openDb = () => {

@@ -4,6 +4,9 @@ import { supabase } from '../supabaseClient';
 import { lockPageScroll, unlockPageScroll } from '../lib/scrollLock';
 import { addDailyMs } from '../lib/readingStats';
 import { bookCacheKey, getCachedBook, cacheBook } from '../lib/bookCache';
+import { fetchWithProxy } from '../lib/fetchProxy';
+import { parseEpubBytes } from '../lib/epub';
+import { SE_ORIGIN } from '../lib/standardebooks';
 import { textToBookHtml, detectFormatCandidates, isChapterLine } from '../lib/bookFormat';
 import { trapFocusIn } from '../lib/focusTrap';
 
@@ -61,72 +64,7 @@ const stripGutenbergBoilerplate = (doc) => {
   }
 };
 
-const looksLikeHtml = (text) => {
-  const head = text.slice(0, 500).trimStart().toLowerCase();
-  return head.startsWith('<!doctype html') || head.startsWith('<html');
-};
 
-// Dev-only Vite proxies (see vite.config.js). In production these paths serve
-// the SPA shell or 404, which looksLikeHtml / !res.ok filters out.
-const devProxyFor = (url) => {
-  if (url.includes('gutenberg.org')) return url.replace(/^https?:\/\/[^/]+/, '/gutenberg');
-  if (url.includes('archive.org')) return url.replace(/^https?:\/\/[^/]+/, '/ia');
-  return null;
-};
-
-const fetchWithProxy = async (url, responseType = 'text', signal = null) => {
-  const devProxy = devProxyFor(url);
-  const proxyMakers = [
-    ...(devProxy ? [{ make: () => devProxy, timeout: 20000 }] : []),
-    { make: () => `/api/proxy?url=${encodeURIComponent(url)}`, timeout: 25000 },
-    { make: () => `https://corsproxy.io/?${encodeURIComponent(url)}`, timeout: 10000 },
-    { make: () => url, timeout: 10000 }
-  ];
-
-  for (const item of proxyMakers) {
-    try {
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      const proxyUrl = item.make();
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), item.timeout); // Adaptive timeout
-
-      const abortHandler = () => {
-        controller.abort();
-      };
-      if (signal) {
-        signal.addEventListener('abort', abortHandler);
-      }
-
-      const res = await fetch(proxyUrl, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (signal) {
-        signal.removeEventListener('abort', abortHandler);
-      }
-
-      if (!res.ok) continue;
-      if (responseType === 'arraybuffer') return await res.arrayBuffer();
-
-      const text = await res.text();
-      // Reject HTML shells (SPA fallback / wrong route / error pages) that
-      // would otherwise be parsed as book content.
-      if (responseType === 'text' && looksLikeHtml(text)) {
-        continue;
-      }
-      // Check for corsproxy.io pricing/error responses disguised as 200 OK
-      if (text.includes("Server-side requests are not allowed") || text.includes("Upgrade at https://corsproxy.io")) {
-        console.warn("corsproxy.io pricing limit reached, trying next fallback");
-        continue;
-      }
-      return text;
-    } catch (e) {
-      if (e.name === 'AbortError' && signal?.aborted) {
-        throw e;
-      }
-      continue; // try next proxy
-    }
-  }
-  throw new Error(`All proxies failed for: ${url}`);
-};
 
 
 // '#RRGGBB' / '#RGB' → rgba(r,g,b,a) for theme-aware gradients
@@ -499,12 +437,49 @@ const splitIntoChapters = (doc) => {
     }
   }
 
+  // Bound per-chapter DOM size: a single-chapter 6MB import would otherwise
+  // wedge the main thread in pagination. Oversized chapters split at element
+  // boundaries into (n/m) virtual parts; the reader loads one at a time.
+  const MAX_CHAPTER_CHARS = 160000;
+  const sized = [];
+  const sizeRemap = [];
+  for (let i = 0; i < merged.length; i++) {
+    const ch = merged[i];
+    sizeRemap[i] = sized.length;
+    if ((ch.html || '').length <= MAX_CHAPTER_CHARS) {
+      sized.push(ch);
+      continue;
+    }
+    const wrap = document.createElement('div');
+    wrap.innerHTML = ch.html;
+    const nodes = [...wrap.childNodes];
+    let acc = '';
+    const parts = [];
+    const flushPart = () => {
+      if (acc.trim()) {
+        parts.push(acc);
+        acc = '';
+      }
+    };
+    nodes.forEach((n, idx) => {
+      acc += n.outerHTML ?? (n.nodeType === Node.TEXT_NODE ? n.nodeValue : '');
+      if (acc.length >= MAX_CHAPTER_CHARS && idx < nodes.length - 1) flushPart();
+    });
+    flushPart();
+    if (!parts.length) parts.push(ch.html);
+    parts.forEach((p, j) => sized.push({
+      id: `${ch.id || 'ch'}-${i}-p${j}`,
+      title: `${ch.title} (${j + 1}/${parts.length})`,
+      html: p,
+    }));
+  }
+
   const remappedToc = tocItems.map((t) => ({
     ...t,
-    chapterIndex: remap[t.chapterIndex] ?? t.chapterIndex,
+    chapterIndex: sizeRemap[remap[t.chapterIndex] ?? t.chapterIndex] ?? t.chapterIndex,
   }));
 
-  return { chapters: merged.length ? merged : chapters, tocItems: remappedToc };
+  return { chapters: sized.length ? sized : merged, tocItems: remappedToc };
 };
 
 const NativeReader = ({ book, onClose, user }) => {
@@ -1049,6 +1024,38 @@ const NativeReader = ({ book, onClose, user }) => {
           }
         }
         return;
+      }
+
+      // Standard Ebooks: public epub downloads behind an interstitial page.
+      // The catalog carries the book path; the epub href is resolved from
+      // the book page, then downloaded with ?source=download.
+      if (book._source === 'standardebooks' && book._sePath) {
+        try {
+          const cached = await getCachedBook(bookCacheKey(book));
+          if (cached?.kind === 'se-epub') {
+            processAndSetBook(await parseEpubBytes(cached.data), savedHighlights);
+            return;
+          }
+          const pageHtml = await fetchWithProxy(`${SE_ORIGIN}${book._sePath}`, 'text', signal);
+          if (signal?.aborted) return;
+          const pageDoc = new DOMParser().parseFromString(pageHtml, 'text/html');
+          const epubHref = pageDoc.querySelector('a[href*="/downloads/"][href$=".epub"]')?.getAttribute('href');
+          if (!epubHref) throw new Error('No EPUB download found for this book.');
+          const bytes = new Uint8Array(await fetchWithProxy(`${SE_ORIGIN}${epubHref}?source=download`, 'arraybuffer', signal));
+          if (signal?.aborted) return;
+          if (bytes.length < 5000) throw new Error('EPUB download failed.');
+          cacheBook(bookCacheKey(book), 'se-epub', bytes);
+          processAndSetBook(await parseEpubBytes(bytes), savedHighlights);
+          return;
+        } catch (err) {
+          if (signal?.aborted) return;
+          console.error('Standard Ebooks load error:', err);
+          if (isMountedRef.current) {
+            setError('Unable to load this Standard Ebooks title. Try again or pick another edition.');
+            setLoading(false);
+          }
+          return;
+        }
       }
 
       // Internet Archive books: resolve actual download URLs first

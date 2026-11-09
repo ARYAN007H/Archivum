@@ -91,7 +91,10 @@ export const textToBookHtml = (rawText, aiHints = null) => {
   const lines = rawText.split('\n');
   let html = '';
   let inFrontMatter = true;
-  let paragraph = '';
+  // Lines accumulate as an array and join once at flush — string
+    // concatenation over a growing multi-MB paragraph is quadratic.
+  let paragraphParts = [];
+  let paragraphLen = 0;
   let illustrationOpen = false;
   let fmLineCount = 0;
   let consecutiveProseLines = 0;
@@ -112,14 +115,18 @@ export const textToBookHtml = (rawText, aiHints = null) => {
     return lower.length >= 3;
   };
 
-  const appendLine = (acc, line) => {
-    if (!acc) return line;
+  const pushParagraphLine = (line) => {
+    if (!line) return;
+    const last = paragraphParts[paragraphParts.length - 1];
     // OCR wraps words with a line-end hyphen ("distinc-" / "tion") — rejoin
     // lowercase continuations without the hyphen; keep real compounds.
-    if (/[A-Za-z\u0900-\u097F]-$/.test(acc) && /^[a-z\u0900-\u097F]/.test(line)) {
-      return acc.slice(0, -1) + line;
+    if (last && /[A-Za-z\u0900-\u097F]-$/.test(last) && /^[a-z\u0900-\u097F]/.test(line)) {
+      paragraphParts[paragraphParts.length - 1] = last.slice(0, -1) + line;
+      paragraphLen += line.length;
+      return;
     }
-    return acc + ' ' + line;
+    paragraphParts.push(line);
+    paragraphLen += line.length + 1;
   };
 
   const fmtInline = (t) => t
@@ -129,12 +136,13 @@ export const textToBookHtml = (rawText, aiHints = null) => {
     .replace(/_/g, '');
 
   const flushParagraph = (cls = '') => {
-    if (!paragraph.trim()) return;
-    const t = fmtInline(paragraph.trim());
+    if (!paragraphLen) return;
+    const t = fmtInline(paragraphParts.join(' ').trim());
+    paragraphParts = [];
+    paragraphLen = 0;
     // A paragraph seeded with a speaker span is a dialogue turn
     const isDialogue = t.startsWith('<span class="speaker"');
     html += `<p${isDialogue ? ' class="dialogue"' : cls ? ` class="${cls}"` : ''}>${t}</p>`;
-    paragraph = '';
   };
 
   // Verse rendering: open block lazily, one span per line, closed on the
@@ -181,7 +189,7 @@ export const textToBookHtml = (rawText, aiHints = null) => {
     pulled.forEach((last) => {
       const text = last.replace(/^<div class="fm-line">([\s\S]*)<\/div>$/, '$1')
         .replace(/<em>/g, '_').replace(/<\/em>/g, '_').replace(/_/g, '');
-      paragraph = appendLine(paragraph, text);
+      pushParagraphLine(text);
       fmLineCount--;
     });
     flushParagraph('');
@@ -292,7 +300,7 @@ export const textToBookHtml = (rawText, aiHints = null) => {
     // Front matter ends at the first chapter division, or at the first
     // substantial prose paragraph (title pages are short lines; a preface
     // with real paragraphs must not be rendered centered).
-    if (inFrontMatter && (isChapterLine(trimmed) || trimmed.length > 280 || paragraph.length > 280)) {
+    if (inFrontMatter && (isChapterLine(trimmed) || trimmed.length > 280 || paragraphLen > 280)) {
       const chapterStart = isChapterLine(trimmed);
       closeFrontMatterSection();
       if (chapterStart) {
@@ -327,7 +335,7 @@ export const textToBookHtml = (rawText, aiHints = null) => {
           }
         }
       } else {
-        paragraph = appendLine(paragraph, trimmed);
+        pushParagraphLine(trimmed);
         continue;
       }
     }
@@ -363,7 +371,8 @@ export const textToBookHtml = (rawText, aiHints = null) => {
         flushParagraph();
         const speaker = speakerMatch ? speakerMatch[1] : trimmed.replace(/:$/, '');
         const speech = speakerMatch ? speakerMatch[2] : '';
-        paragraph = `<span class="speaker">${escapeHtmlText(speaker)}</span>${speech ? ` ${speech}` : ''}`;
+        paragraphParts = [`<span class="speaker">${escapeHtmlText(speaker)}</span>${speech ? ` ${speech}` : ''}`];
+    paragraphLen = speech.length + 24;
         continue;
       }
     }
@@ -383,7 +392,10 @@ export const textToBookHtml = (rawText, aiHints = null) => {
       continue;
     }
 
-    paragraph = appendLine(paragraph, trimmed);
+    pushParagraphLine(trimmed);
+    // Sources without blank lines (machine dumps, some OCR) otherwise merge
+    // into one multi-megabyte paragraph — bound it at sentence-ish breaks.
+    if (paragraphLen > 3000) flushParagraph();
   }
   closeVerse();
   flushParagraph();

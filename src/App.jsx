@@ -581,6 +581,28 @@ function App() {
 
   const loaderRef = useRef(null);
   const overlaySearchId = useRef(0);
+  const searchDebounceRef = useRef(null);
+  const [seBooks, setSeBooks] = useState([]);
+
+  // Standard Ebooks catalog: best-effort, cached for a week in localStorage.
+  // Merged into the grid below the Gutendex results.
+  useEffect(() => {
+    let alive = true;
+    const TTL = 7 * 86400000;
+    try {
+      const cached = JSON.parse(localStorage.getItem('archivum_se_catalog') || 'null');
+      if (cached && Date.now() - cached.at < TTL && Array.isArray(cached.books) && cached.books.length) {
+        setSeBooks(cached.books);
+        return;
+      }
+    } catch { /* re-fetch on bad cache */ }
+    import('./lib/standardebooks').then(({ fetchStandardEbooks }) => fetchStandardEbooks(2)).then((books) => {
+      if (!alive || !books.length) return;
+      setSeBooks(books);
+      try { localStorage.setItem('archivum_se_catalog', JSON.stringify({ at: Date.now(), books })); } catch { /* quota */ }
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const scrollPositionRef = useRef(0);
   const currentFetchId = useRef(0);
   const loadingRef = useRef(false);
@@ -938,7 +960,10 @@ function App() {
     });
 
     if (missingIds.length > 0) {
-      const gutIds = missingIds.filter(id => !id.toString().startsWith('ia_'));
+      // Only numeric Gutenberg ids can go to the batch endpoint — a single
+      // local:/garbage id makes the whole ?ids= query 400 and silently drops
+      // every legitimate book from the library.
+      const gutIds = missingIds.filter(id => /^\d+$/.test(id.toString()));
       if (gutIds.length > 0) {
         try {
           const res = await fetch(`https://gutendex.com/books?ids=${gutIds.join(',')}`);
@@ -1061,6 +1086,7 @@ function App() {
     try {
       setImportError(null);
       const localBook = await openLocalFile(file);
+      addToast(`Imported "${localBook.title}".`);
       if (user) {
         // Persist to library metadata immediately (startReading only fires
         // from the detail panel; imported files skip nothing anyway, but the
@@ -1085,7 +1111,11 @@ function App() {
       openBook(localBook);
     } catch (err) {
       console.error('Import failed:', err);
-      setImportError(err.message || 'Could not open this file.');
+      // Surface everywhere (toasts render above any view) — the inline
+      // notice only exists on the library screen.
+      const msg = err?.message?.trim() || 'This file could not be read as a book.';
+      setImportError(msg);
+      addToast(`Import failed — ${msg}`);
     }
   };
 
@@ -1126,68 +1156,79 @@ function App() {
 
   // Search overlay handler with caching + parallel search
   const handleOverlaySearch = useCallback(async (q, forceLang = null) => {
-    if (!q.trim()) { setSearchResults([]); setLocalSuggestions([]); return; }
+    if (!q.trim()) {
+      clearTimeout(searchDebounceRef.current);
+      setSearchResults([]);
+      setLocalSuggestions([]);
+      return;
+    }
 
-    // Instant local suggestions
+    // Instant local suggestions — no network needed for these
     const activeLang = forceLang !== null ? forceLang : searchLangFilter;
     setLocalSuggestions(getLocalSuggestions(q, activeLang));
 
     // Check cache
     const cacheKey = `${q.toLowerCase().trim()}|${activeLang}`;
     if (searchCache.has(cacheKey)) {
+      clearTimeout(searchDebounceRef.current);
       setSearchResults(searchCache.get(cacheKey));
       return;
     }
 
-    const searchId = ++overlaySearchId.current;
-    setSearchLoading(true);
-    try {
-      // Parallel search: Gutenberg + Internet Archive
-      const fetchers = [];
+    // Debounce the network round-trip — typing fires one request for the
+    // settled query instead of one per keystroke.
+    clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(async () => {
+      const searchId = ++overlaySearchId.current;
+      setSearchLoading(true);
+      try {
+        // Parallel search: Gutenberg + Internet Archive
+        const fetchers = [];
 
-      if (activeLang !== 'hi') {
-        fetchers.push(
-          fetch(`https://gutendex.com/books/?search=${encodeURIComponent(q)}`)
-            .then(r => r.json())
-            .then(data => (data.results?.slice(0, 5) || []).map(b => ({
-              ...b,
-              authors: (b.authors || []).map(a => ({ ...a, name: formatAuthorName(a.name) })),
-            })))
-            .catch(() => [])
-        );
-      }
+        if (activeLang !== 'hi') {
+          fetchers.push(
+            fetch(`https://gutendex.com/books/?search=${encodeURIComponent(q)}`)
+              .then(r => r.json())
+              .then(data => (data.results?.slice(0, 5) || []).map(b => ({
+                ...b,
+                authors: (b.authors || []).map(a => ({ ...a, name: formatAuthorName(a.name) })),
+              })))
+              .catch(() => [])
+          );
+        }
 
-      if (activeLang !== 'en') {
-        fetchers.push(
-          fetchIASearch(q).catch(() => [])
-        );
-      }
+        if (activeLang !== 'en') {
+          fetchers.push(
+            fetchIASearch(q).catch(() => [])
+          );
+        }
 
-      const allResults = await Promise.all(fetchers);
-      // A slow response for an earlier keystroke must never overwrite the
-      // results of the latest one.
-      if (searchId !== overlaySearchId.current) return;
-      const merged = allResults.flat();
+        const allResults = await Promise.all(fetchers);
+        // A slow response for an earlier keystroke must never overwrite the
+        // results of the latest one.
+        if (searchId !== overlaySearchId.current) return;
+        const merged = allResults.flat();
 
-      // Deduplicate
-      const seen = new Set();
-      const deduped = merged.filter(b => {
-        const key = b.title.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, '').substring(0, 30);
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      }).slice(0, 10);
+        // Deduplicate
+        const seen = new Set();
+        const deduped = merged.filter(b => {
+          const key = b.title.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]/g, '').substring(0, 30);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }).slice(0, 10);
 
-      // Cache results
-      searchCache.set(cacheKey, deduped);
-      if (searchCache.size > 50) {
-        const firstKey = searchCache.keys().next().value;
-        searchCache.delete(firstKey);
-      }
+        // Cache results
+        searchCache.set(cacheKey, deduped);
+        if (searchCache.size > 50) {
+          const firstKey = searchCache.keys().next().value;
+          searchCache.delete(firstKey);
+        }
 
-      setSearchResults(deduped);
-    } catch { setSearchResults([]); }
-    if (searchId === overlaySearchId.current) setSearchLoading(false);
+        setSearchResults(deduped);
+      } catch { setSearchResults([]); }
+      if (searchId === overlaySearchId.current) setSearchLoading(false);
+    }, 350);
   }, [searchLangFilter]);
 
   const openBook = (book) => {
@@ -1408,7 +1449,7 @@ function App() {
             {view === 'catalog' ? 'The Archive' : view === 'stats' ? 'Reading Stats' : view === 'saved' ? 'Saved Books' : 'Continue Reading'}
           </h2>
           <span className="mono text-secondary">
-            {view === 'catalog' ? `Showing ${books.length} works` : view === 'saved' ? `${savedBooks.length} saved books` : view === 'stats' ? 'Your reading journey' : `${libraryBooks.length} books in progress`}
+            {view === 'catalog' ? `Showing ${books.length + seBooks.length} works` : view === 'saved' ? `${savedBooks.length} saved books` : view === 'stats' ? 'Your reading journey' : `${libraryBooks.length} books in progress`}
           </span>
           {view === 'library' && (
             <>
@@ -1570,7 +1611,7 @@ function App() {
           {loading && books.length === 0 && view === 'catalog' && (
             Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={`sk-${i}`} />)
           )}
-          {(view === 'catalog' ? books : view === 'saved' ? savedBooks : view === 'library' ? libraryBooks : []).map(book => {
+          {(view === 'catalog' ? [...books, ...seBooks] : view === 'saved' ? savedBooks : view === 'library' ? libraryBooks : []).map(book => {
             let authorName = book.authors?.[0]?.name || 'Unknown';
             const lang = (book.languages?.[0] || 'en').toUpperCase();
             const subjectClean = book.subjects?.[0] ? cleanSubject(book.subjects[0]) : null;
