@@ -246,8 +246,15 @@ const IA_COVER_URL = 'https://archive.org/services/img';
 // "Lionel Giles", but "Sun-tzu, 6th cent. B.C" is left untouched.
 const formatAuthorName = (name) => {
   if (!name || typeof name !== 'string') return name;
-  const parts = name.split(',').map(p => p.trim()).filter(Boolean);
-  if (parts.length !== 2) return name;
+  // Gutendex embeds life dates in the name ("Shakespeare, William, 1564-1616");
+  // the detail panel shows years separately from structured birth/death fields.
+  // Internet Archive appends role suffixes ("…, 1859-1930, AUTHOR").
+  const cleaned = name
+    .replace(/\s*,\s*[c.]?\s*\d{1,4}\s*[–—-]\s*[c.]?\s*\d{0,4}\s*$/, '')
+    .replace(/\s*,\s*(author|illustrator|editor|translator)\s*\.?$/i, '')
+    .trim();
+  const parts = cleaned.split(',').map(p => p.trim()).filter(Boolean);
+  if (parts.length !== 2) return cleaned || name;
   const [last, first] = parts;
   const looksLikeName = (s) =>
     s.length > 1 && s.length < 40 && !/\d/.test(s) &&

@@ -490,6 +490,11 @@ button {
   transition: all 0.2s ease;
   cursor: pointer;
   white-space: nowrap;
+  /* Long titles must ellipsize inside the results column, not widen it
+     into a horizontal scrollbar on phones */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .suggestion-chip:hover {
@@ -1465,6 +1470,25 @@ button {
   break-inside: avoid;
 }
 
+/* Dialogue (plays, transcripts, dialogue-driven textbooks): the speaker
+   label is a small-caps lead inside the paragraph instead of a fake
+   heading. Hanging indent keeps wrapped speech aligned under the speech,
+   the classic drama typography. */
+.reader-content p.dialogue {
+  margin: 0.55em 0 0.55em 1.4em;
+  text-indent: -1.4em;
+  break-inside: avoid;
+}
+
+.reader-content .speaker {
+  font-variant: small-caps;
+  text-transform: capitalize;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  margin-right: 0.55em;
+  opacity: 0.9;
+}
+
 .reader-content p[style*="text-align: center"],
 .reader-content p[style*="text-align:center"] {
   text-indent: 0 !important;
@@ -1958,6 +1982,18 @@ button {
   box-shadow: 0 12px 32px rgba(0,0,0,0.3);
 }
 
+/* Phones: auto-fit minmax(200px,1fr) collapses to one full-width column —
+   stack the four stat tiles 2×2 instead of a long scroll. */
+@media (max-width: 560px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+  .stat-card {
+    padding: 18px 16px;
+  }
+}
+
 .stat-card-value {
   font-family: 'Playfair Display', serif;
   font-size: 2.2rem;
@@ -2217,13 +2253,23 @@ button {
   .card-progress-ring { width: 28px !important; height: 28px !important; }
   
   /* ---- DETAIL PANEL ---- */
-  /* Make it full screen on mobile */
-  .detail-panel {
-    height: 92vh !important;
-    padding: 24px 20px !important;
-    gap: 20px !important;
-    flex-direction: column !important;
+  /* Bottom sheet: the sheet itself scrolls. The container's desktop inline
+     height:70vh + padding:60px left the CTA below the fold and unreachable
+     on phones — override both and let the sheet scroll its natural height. */
+  .detail-panel-container {
+    height: auto !important;
+    max-height: 92vh !important;
+    max-height: 92dvh !important;
+    padding: 28px 20px calc(28px + env(safe-area-inset-bottom)) !important;
     overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  .detail-panel {
+    height: auto !important;
+    padding: 0 !important;
+    gap: 18px !important;
+    flex-direction: column !important;
+    overflow-y: visible !important;
     align-items: center !important;
   }
   /* Cover smaller on mobile */
@@ -2261,6 +2307,9 @@ button {
     padding-top: 5vh !important;
     padding-left: 12px;
     padding-right: 12px;
+  }
+  .search-overlay-results {
+    overflow-x: hidden !important;
   }
   .search-overlay-modal {
     max-width: 100% !important;

@@ -147,7 +147,9 @@ const textToBookHtml = (rawText) => {
       .replace(/\*([^*]+)\*/g, '<strong>$1</strong>')
       // Unpaired underscores are OCR emphasis artifacts, not content
       .replace(/_/g, '');
-    html += `<p${cls ? ` class="${cls}"` : ''}>${t}</p>`;
+    // A paragraph seeded with a speaker span is a dialogue turn
+    const isDialogue = t.startsWith('<span class="speaker"');
+    html += `<p${isDialogue ? ' class="dialogue"' : cls ? ` class="${cls}"` : ''}>${t}</p>`;
     paragraph = '';
   };
 
@@ -189,6 +191,38 @@ const textToBookHtml = (rawText) => {
     const wordish = line.match(/[A-Za-z\u0900-\u097F]{2,}/g) || [];
     return wordish.length < 2 && line.length < 25;
   };
+
+  // --- Dialogue/speaker detection (plays, transcripts, dialogue textbooks) ---
+  // Speaker labels ("HAMLET", "ANDREW:") are short ALL-CAPS lines that the
+  // generic all-caps-heading rule would turn into fake headings, shredding
+  // the conversation into heading/paragraph/heading fragments. A trailing
+  // colon is an explicit label signal; bare names are only trusted when the
+  // same name recurs across the book — real speakers speak many times,
+  // one-off headings don't.
+  const HEADING_WORDS = /^(THE\s+END|FINIS|CONTENTS|INDEX|PREFACE|FOREWORD|PROLOGUE|EPILOGUE|INTRODUCTION|ACKNOWLEDGEMENTS|ACKNOWLEDGMENTS|APPENDIX|GLOSSARY|BIBLIOGRAPHY|AFTERWORD|ABOUT\s+THE\s+AUTHOR|EXERCISES?|SUMMARY|NOTES?|REFERENCES?|ANSWERS?|REVIEW|DISCUSSION|QUESTIONS?|ACTIVITY|VOCABULARY|KEY\s+\w+)\b/;
+  const isSpeakerLabelLine = (line) =>
+    line.length >= 2 && line.length <= 34 &&
+    /^[A-Z][A-Z\s.'\u2019&-]*[A-Z.]:?$/.test(line) &&
+    !isChapterLine(line) && !HEADING_WORDS.test(line);
+
+  const speakerCounts = new Map();
+  for (const l of lines) {
+    const t = l.trim();
+    if (isSpeakerLabelLine(t)) {
+      // "ANDREW:" and "ANDREW" are the same voice — count both toward the
+      // frequency gate so mixed OCR formats still reach the threshold.
+      const name = t.replace(/:$/, '');
+      speakerCounts.set(name, (speakerCounts.get(name) || 0) + 1);
+    }
+  }
+  // Recall over precision on purpose: a false positive still renders as a
+  // readable small-caps lead paragraph, while a miss recreates the
+  // heading/paragraph/heading shredding the rule exists to fix. Two turns
+  // per voice is a common minimum in short textbook dialogues.
+  const SPEAKER_MIN_USES = 2;
+  const speakerNames = new Set(
+    [...speakerCounts.entries()].filter(([, n]) => n >= SPEAKER_MIN_USES).map(([name]) => name)
+  );
 
   for (let i = 0; i < lines.length; i++) {
     let trimmed = lines[i].trim();
@@ -260,6 +294,26 @@ const textToBookHtml = (rawText) => {
     if (trimmed === '') {
       flushParagraph();
       continue;
+    }
+
+    // Dialogue turns. Inline label ("ANDREW: What do you mean?") or a
+    // standalone speaker line ("ANDREW" / "ANDREW:") followed by its speech.
+    // Both render as a small-caps speaker lead inside the paragraph — never
+    // a heading. Chapter keywords ("ACT I: THE COURT") stay headings.
+    if (!isChapterLine(trimmed)) {
+      const speakerMatch = trimmed.match(/^([A-Z][A-Z\s.'\u2019&-]{0,30}[A-Z.]?)\s*:\s+(\S.*)$/) ||
+        // Single Titlecase word + colon ("Andrew: …") — multi-word Titlecase
+        // is too ambiguous ("The Following: …"), all-caps handles those.
+        trimmed.match(/^([A-Z][a-z'\u2019-]{1,14})\s*:\s+(\S.*)$/);
+      const standaloneSpeaker = speakerNames.has(trimmed) ||
+        (/^[A-Z][A-Z\s.'\u2019&-]{0,30}:$/.test(trimmed) && !HEADING_WORDS.test(trimmed));
+      if (speakerMatch || standaloneSpeaker) {
+        flushParagraph();
+        const speaker = speakerMatch ? speakerMatch[1] : trimmed.replace(/:$/, '');
+        const speech = speakerMatch ? speakerMatch[2] : '';
+        paragraph = `<span class="speaker">${escapeHtmlText(speaker)}</span>${speech ? ` ${speech}` : ''}`;
+        continue;
+      }
     }
 
     const isHeading = trimmed.length > 0 && trimmed.length < 80 && (
@@ -465,7 +519,7 @@ const sanitizeBookDom = (doc) => {
   doc.querySelectorAll('[style]').forEach((el) => el.removeAttribute('style'));
   // Classes the reader's own typography engine relies on survive; everything
   // else (upstream Gutenberg/IA styling) is dropped.
-  const PRESERVED_CLASSES = new Set(['chapter-heading', 'has-dropcap', 'reader-front-matter', 'fm-line', 'fm-p', 'fm-caption']);
+  const PRESERVED_CLASSES = new Set(['chapter-heading', 'has-dropcap', 'reader-front-matter', 'fm-line', 'fm-p', 'fm-caption', 'dialogue', 'speaker']);
   doc.querySelectorAll('[class]').forEach((el) => {
     const classes = [...el.classList];
     const kept = classes.filter((c) => PRESERVED_CLASSES.has(c));
@@ -2142,7 +2196,7 @@ const NativeReader = ({ book, onClose, user }) => {
         }}
       >
         <div style={{ display: 'flex', gap: isMobile ? '12px' : '16px', alignItems: 'center' }}>
-          <button onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
+          <button onClick={onClose} aria-label="Back to library" style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
             <ArrowLeft size={16} /> <span className="mono" style={{ fontSize: '10px' }}>{!isMobile && "LIBRARY"}</span>
           </button>
           <div style={{ width: '1px', height: '16px', background: 'var(--border)' }}></div>
