@@ -178,6 +178,9 @@ const DynamicCover = ({ book, style, className }) => {
     return null;
   });
   const [loading, setLoading] = useState(true);
+  // A cached remote cover that fails to load (IA service hiccup, dead link)
+  // falls back to the generated cover instead of a broken-image icon.
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     if (coverUrl || book._source !== 'archive') return;
@@ -221,18 +224,18 @@ const DynamicCover = ({ book, style, className }) => {
     () => generateCover(book.title, coverAuthorName, book.id),
     [book.title, coverAuthorName, book.id]
   );
-  const finalSrc = coverUrl && coverUrl !== 'notfound' ? coverUrl : fallback;
+  const finalSrc = !loadFailed && coverUrl && coverUrl !== 'notfound' ? coverUrl : fallback;
 
   return (
     <div style={{ position: 'relative', display: 'flex', ...style }} className={className}>
       {loading && <div className="image-shimmer" style={{ position: 'absolute', inset: 0, borderRadius: style?.borderRadius || 0 }} aria-hidden="true" />}
-      <img 
-        src={finalSrc} 
-        alt={book.title} 
-        style={{ width: '100%', height: '100%', objectFit: style?.objectFit || 'cover', borderRadius: style?.borderRadius || 0, display: 'block' }} 
-        loading="lazy" 
+      <img
+        src={finalSrc}
+        alt={book.title}
+        style={{ width: '100%', height: '100%', objectFit: style?.objectFit || 'cover', borderRadius: style?.borderRadius || 0, display: 'block' }}
+        loading="lazy"
         onLoad={() => setLoading(false)}
-        onError={() => setLoading(false)}
+        onError={() => { setLoading(false); setLoadFailed(true); }}
       />
     </div>
   );
@@ -1455,7 +1458,7 @@ function App() {
             <>
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="mono"
+                className="mono library-import-btn"
                 aria-label="Import a .txt or .epub file from this device"
                 style={{
                   position: 'absolute', right: 0, bottom: '4px',
@@ -2018,6 +2021,10 @@ function App() {
         <button className={`mobile-nav-item`} onClick={() => setShowSearchOverlay(true)}>
           <Search size={20} />
           <span>Search</span>
+        </button>
+        <button className={`mobile-nav-item ${view === 'library' ? 'active' : ''}`} onClick={() => setView('library')}>
+          <Library size={20} />
+          <span>Library</span>
         </button>
         <button className={`mobile-nav-item ${view === 'saved' ? 'active' : ''}`} onClick={() => setView('saved')}>
           <Heart size={20} />

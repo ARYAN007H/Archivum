@@ -2040,6 +2040,16 @@ button {
   }
 }
 
+/* The absolute-positioned desktop import pill collides with the library
+   header text on phones — flow it under the header instead. */
+@media (max-width: 768px) {
+  .library-import-btn {
+    position: static !important;
+    display: inline-block;
+    margin-top: 14px;
+  }
+}
+
 .stat-card-value {
   font-family: 'Playfair Display', serif;
   font-size: 2.2rem;
