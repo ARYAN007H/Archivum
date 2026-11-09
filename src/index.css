@@ -1489,6 +1489,52 @@ button {
   opacity: 0.9;
 }
 
+/* Verse (poetry, songs): preserve the poet's line breaks — ragged left,
+   indented block, no justification, no paragraph indent. Stanzas are
+   separate blocks separated by the stanza break. */
+.reader-content .verse {
+  margin: 0.9em 0 0.9em 1.8em;
+  break-inside: avoid;
+}
+
+.reader-content .verse-line {
+  display: block;
+  text-indent: 0;
+  text-align: left;
+  line-height: 1.6;
+}
+
+/* OpenDyslexic — accessibility typeface, only fetched when the reader's
+   Dyslexic font option is selected (font-display: swap keeps first paint
+   instant on the fallback). */
+@font-face {
+  font-family: 'OpenDyslexic';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('https://cdn.jsdelivr.net/npm/@fontsource/opendyslexic@5.3.0/files/opendyslexic-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'OpenDyslexic';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('https://cdn.jsdelivr.net/npm/@fontsource/opendyslexic@5.3.0/files/opendyslexic-latin-700-normal.woff2') format('woff2');
+}
+
+/* Respect the OS reduce-motion setting: page turns, modals and chrome
+   animations become instant instead of sliding. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 .reader-content p[style*="text-align: center"],
 .reader-content p[style*="text-align:center"] {
   text-indent: 0 !important;

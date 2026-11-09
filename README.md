@@ -24,8 +24,12 @@ The app features a custom, high-performance in-memory reading engine with a dedi
 ### Reader Engine
 - **📖 Chapter-by-Chapter Reader**: Unlike naive e-readers that load entire books into the DOM (causing massive performance lag), Archivum splits raw Gutenberg / Internet Archive text in-memory and loads exactly one chapter at a time, paginated into CSS columns.
 - **🧹 OCR & Text Formatting Pipeline**: Raw Internet Archive OCR dumps and Gutenberg plaintext are cleaned up before rendering — title-page/front-matter detection and buffering, running headers and page-number junk filtering, hyphenated line-break rejoining (`distinc- tion` → `distinction`), `[Illustration: …]` markers converted to captions, and chapter headings detected (including `CHAPTER` / `BOOK` / roman numerals / Devanagari `अध्याय`). Unpaired `_` emphasis markers from OCR are stripped.
+- **🎭 Dialogue-Aware Typography**: Speaker labels in plays, transcripts and dialogue-driven textbooks (`ANDREW:` / standalone `HAMLET`) render as small-caps speaker leads inside the paragraph with classic hanging-indent drama typography — never as fake chapter headings. Speaker detection is frequency-verified across the book, so section headings like `SUMMARY` / `KEY POINTS` stay headings.
+- **📜 Verse Preservation**: Poems and songs keep the poet's line breaks — stanzas render as indented blocks instead of being merged into justified paragraphs.
+- **🤖 Smart Formatting (on-device AI)**: Optional mode backed by a ~22MB fine-tuned MiniLM line classifier (trained on Kaggle — [kernel](https://www.kaggle.com/code/imhumon/archivum-line-format)) that runs **entirely in your browser** via transformers.js — no server, nothing leaves the device. Behind the reader's *Smart Format* toggle it refines the rule engine's ambiguous calls (speaker vs heading, verse membership); everything else stays deterministic. 91% validation accuracy across prose / speaker / heading / verse / junk.
 - **📱 Responsive Layout Adaptivity**: Dual-page spread layout with horizontal page flips for desktop screens, automatically transitioning to a clean single-column layout on mobile — with breakpoint-tuned hero and navigation scaling from 375px up to desktop.
 - **🖌️ Opt-in Drop Caps**: Chapter-opening paragraphs get decorative drop caps, applied conservatively so scanned front matter isn't mangled.
+- **🛠️ Reading Fonts**: Libre Baskerville, Palatino, Georgia, JetBrains Mono, system — plus **OpenDyslexic** for accessible reading.
 - **🛡️ Sanitized Rendering**: All book HTML passes through a DOM sanitizer that strips event-handler attributes and `javascript:` URLs, keeping only a known allowlist of reader classes.
 
 ### Reading Tools
@@ -36,9 +40,13 @@ The app features a custom, high-performance in-memory reading engine with a dedi
 - **🛠️ Fully Customizable Reader Environment**: Tweak body font sizes, line heights, page margins, and fonts (Georgia, Libre Baskerville, Serif) on the fly.
 
 ### Library & Progress
+- **📥 Your Own Files**: Import `.txt` and `.epub` books from your device — via the library's *Import* button, drag-and-drop anywhere in the app, or the OS "Open with Archivum" file handler. EPUB spine items become reader chapters automatically; everything runs locally.
+- **🌙 Offline Reading**: Every book you open is cached in IndexedDB — re-opens are instant and airplane-mode-proof.
+- **📍 Exact Position Sync**: Reading position is stored as a character offset, not a page number — resume mid-sentence on another device (Supabase `reading_progress.position` = `{chapterIndex, charStart}`) or after changing font size, with zero drift.
 - **🔥 Gamified Reading Streaks**: Interactive heatmap tracker of reading consistency with a true consecutive-day streak calculation and a daily-goal ring fed by real minutes read per day.
 - **⌨️ Command Palette** (`⌘/Ctrl + K`): Instant fuzzy search across the catalog with full keyboard navigation (↑ ↓ Enter), screen-reader labelled as a listbox.
 - **💾 Local and Cloud Syncing**: Add books to your personal library and track progress automatically via Supabase — with a safe migration path that never deletes local data unless the cloud save has actually succeeded.
+- **📤 Annotation Export**: Download your highlights and bookmarks as a Markdown file — they're your notes on a public-domain book, they should be able to leave with you.
 
 ### Availability & Reliability
 - **⚡ Layered Proxy Chain**: High-availability source fetching with automatic fallback:
@@ -49,7 +57,7 @@ The app features a custom, high-performance in-memory reading engine with a dedi
   Failures surface a **Retry** button instead of a dead end.
 - **📥 Offline & PWA**: Service worker caching (production only, so dev never serves stale modules), offline metadata caching, and a web manifest for installability.
 - **🧷 Robust Scroll Management**: A counter-based scroll-lock manager handles nested modals and reader overlays, so the page never ends up permanently scroll-locked.
-- **♿ Accessibility**: Labelled icon buttons, `aria-expanded` state, keyboard-first navigation, dialog/listbox roles, and WCAG-friendly muted-text contrast.
+- **♿ Accessibility**: Labelled icon buttons, `aria-expanded` state, keyboard-first navigation, dialog/listbox roles, focus trapped inside open modals, `prefers-reduced-motion` respected, and WCAG-friendly muted-text contrast.
 
 ### ⌨️ Keyboard Shortcuts
 

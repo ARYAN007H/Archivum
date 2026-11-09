@@ -6,6 +6,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Lenis from 'lenis';
 import { lockPageScroll, unlockPageScroll, scrollToPosition } from './lib/scrollLock';
 import { recordReadingDay, getReadingStreak, getTodayMinutes } from './lib/readingStats';
+import { trapFocusIn } from './lib/focusTrap';
+import { openLocalFile } from './lib/localBook';
 
 // ========== ERROR BOUNDARY ==========
 
@@ -582,6 +584,11 @@ function App() {
   const scrollPositionRef = useRef(0);
   const currentFetchId = useRef(0);
   const loadingRef = useRef(false);
+  const authModalRef = useRef(null);
+  const searchOverlayRef = useRef(null);
+  const detailPanelRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [importError, setImportError] = useState(null);
 
   // Search Overlay (Cmd+K)
   const [showSearchOverlay, setShowSearchOverlay] = useState(false);
@@ -1039,6 +1046,71 @@ function App() {
     updateOfflineStatus();
   }, [updateOfflineStatus]);
 
+  // Keep keyboard focus inside the open modal (auth, ⌘K search, book detail).
+  useEffect(() => {
+    if (showAuthModal) return trapFocusIn(authModalRef.current);
+    if (showSearchOverlay) return trapFocusIn(searchOverlayRef.current);
+    if (selectedBook) return trapFocusIn(detailPanelRef.current);
+    return undefined;
+  }, [showAuthModal, showSearchOverlay, selectedBook]);
+
+  // Local file import: picker button, OS drag-and-drop, and PWA file
+  // handling ("Open with Archivum" for .txt / .epub).
+  const openLocalBook = async (file) => {
+    if (!file) return;
+    try {
+      setImportError(null);
+      const localBook = await openLocalFile(file);
+      if (user) {
+        // Persist to library metadata immediately (startReading only fires
+        // from the detail panel; imported files skip nothing anyway, but the
+        // metadata write here makes the book survive a reload pre-read).
+        try {
+          const libraryMeta = JSON.parse(localStorage.getItem('archivum_library_metadata') || '{}');
+          libraryMeta[localBook.id] = {
+            id: localBook.id,
+            title: localBook.title,
+            authors: localBook.authors,
+            formats: localBook.formats,
+            languages: localBook.languages,
+            subjects: localBook.subjects,
+            download_count: 0,
+            _source: 'local',
+            lastRead: Date.now(),
+            progressPercent: 0,
+          };
+          localStorage.setItem('archivum_library_metadata', JSON.stringify(libraryMeta));
+        } catch { /* storage unavailable */ }
+      }
+      openBook(localBook);
+    } catch (err) {
+      console.error('Import failed:', err);
+      setImportError(err.message || 'Could not open this file.');
+    }
+  };
+
+  useEffect(() => {
+    const onDragOver = (e) => { e.preventDefault(); };
+    const onDrop = (e) => {
+      e.preventDefault();
+      const file = [...(e.dataTransfer?.files || [])].find((f) => /\.(txt|epub)$/i.test(f.name));
+      if (file) openLocalBook(file);
+    };
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
+    // PWA file handling (installed app, Chromium)
+    if ('launchQueue' in window) {
+      window.launchQueue.setConsumer(async ({ files }) => {
+        if (files?.length) openLocalBook(files[0]);
+      });
+    }
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, selectedBook]);
+
   // Cmd+K keyboard shortcut
   useEffect(() => {
     const handler = (e) => {
@@ -1330,7 +1402,7 @@ function App() {
 
       {/* MAIN VIEW */}
       <section id="main-view" style={{ padding: '80px 5vw', minHeight: '100dvh', position: 'relative', marginTop: view === 'library' ? '80px' : '0' }}>
-        <div style={{ marginBottom: '60px' }}>
+        <div style={{ marginBottom: '60px', position: 'relative' }}>
           <span className="mono">{view === 'catalog' ? '01 — CATALOG' : view === 'stats' ? '03 — STATISTICS' : '02 — MY LIBRARY'}</span>
           <h2 className="display" style={{ fontSize: 'clamp(2rem, 4vw, 3.5rem)', margin: '8px 0' }}>
             {view === 'catalog' ? 'The Archive' : view === 'stats' ? 'Reading Stats' : view === 'saved' ? 'Saved Books' : 'Continue Reading'}
@@ -1338,6 +1410,33 @@ function App() {
           <span className="mono text-secondary">
             {view === 'catalog' ? `Showing ${books.length} works` : view === 'saved' ? `${savedBooks.length} saved books` : view === 'stats' ? 'Your reading journey' : `${libraryBooks.length} books in progress`}
           </span>
+          {view === 'library' && (
+            <>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="mono"
+                aria-label="Import a .txt or .epub file from this device"
+                style={{
+                  position: 'absolute', right: 0, bottom: '4px',
+                  padding: '10px 16px', fontSize: '10px', letterSpacing: '0.1em',
+                  background: 'transparent', border: '1px solid var(--border)', borderRadius: '999px',
+                  color: 'var(--text-secondary)', cursor: 'pointer'
+                }}
+              >
+                + IMPORT .TXT / .EPUB
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".txt,.epub,text/plain,application/epub+zip"
+                style={{ display: 'none' }}
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) openLocalBook(f); e.target.value = ''; }}
+              />
+              {importError && (
+                <div className="mono" role="alert" style={{ color: 'var(--ember)', fontSize: '11px', marginTop: '8px' }}>{importError}</div>
+              )}
+            </>
+          )}
         </div>
 
         {/* STATS VIEW */}
@@ -1561,7 +1660,7 @@ function App() {
             opacity: selectedBook ? 1 : 0, transition: 'opacity 0.5s' 
           }} 
         />
-        <div className="detail-panel-container" style={{
+        <div className="detail-panel-container" ref={detailPanelRef} style={{
           position: 'relative', background: 'var(--bg-overlay)', borderTop: '1px solid var(--border)',
           height: '70vh', transform: selectedBook ? 'translateY(0)' : 'translateY(100%)', 
           transition: 'transform 0.45s cubic-bezier(0.32, 0, 0, 1)',
@@ -1582,7 +1681,7 @@ function App() {
                 <div className="mono text-secondary" style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
                   <span>WORK № {selectedBook.id.toString().padStart(5, '0')}</span>
                   <span className="lang-badge">{(selectedBook.languages?.[0] || 'en').toUpperCase()}</span>
-                  <span>~{Math.max(30, Math.round(selectedBook.download_count / 500))} MIN READ</span>
+                  <span>~{Math.max(30, Math.round((selectedBook.download_count || 0) / 500))} MIN READ</span>
                 </div>
                 <h2 className="display" style={{ fontSize: 'clamp(1.8rem, 3vw, 3rem)', margin: '12px 0 8px' }}>{selectedBook.title}</h2>
                 <div className="mono" style={{ color: 'var(--gold)' }}>{selectedBook.authors?.[0]?.name || 'Unknown'}</div>
@@ -1648,7 +1747,7 @@ function App() {
       {/* AUTH MODAL */}
       {showAuthModal && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(10px)' }} onClick={() => setShowAuthModal(false)}>
-          <div role="dialog" aria-modal="true" aria-label={authMode === 'login' ? 'Sign in' : 'Create account'} style={{ position: 'relative', background: 'var(--bg-surface)', padding: '40px', border: '1px solid var(--border)', borderRadius: '8px', width: '100%', maxWidth: '420px', display: 'flex', flexDirection: 'column', gap: '20px' }} onClick={(e) => e.stopPropagation()}>
+          <div ref={authModalRef} role="dialog" aria-modal="true" aria-label={authMode === 'login' ? 'Sign in' : 'Create account'} style={{ position: 'relative', background: 'var(--bg-surface)', padding: '40px', border: '1px solid var(--border)', borderRadius: '8px', width: '100%', maxWidth: '420px', display: 'flex', flexDirection: 'column', gap: '20px' }} onClick={(e) => e.stopPropagation()}>
             <button onClick={() => setShowAuthModal(false)} aria-label="Close sign-in dialog" style={{ position: 'absolute', top: '16px', right: '16px', fontSize: '24px', color: 'var(--text-secondary)' }}>&times;</button>
             <h3 className="display" style={{ fontSize: '24px', margin: 0 }}>{authMode === 'login' ? 'Sign In' : 'Create Account'}</h3>
             {authError && <div className="mono" style={{ color: 'var(--ember)', fontSize: '11px' }}>{authError}</div>}
@@ -1670,7 +1769,7 @@ function App() {
       {/* CMD+K SEARCH OVERLAY */}
       {showSearchOverlay && (
         <div className="search-overlay-backdrop" onClick={() => setShowSearchOverlay(false)}>
-          <div className="search-overlay-modal" onClick={e => e.stopPropagation()}>
+          <div ref={searchOverlayRef} className="search-overlay-modal" onClick={e => e.stopPropagation()}>
             <div className="search-overlay-input-wrap">
               <Search size={20} />
               <input

@@ -1,0 +1,28 @@
+{
+  "model_type": "bert",
+  "architectures": [
+    "BertForSequenceClassification"
+  ],
+  "id2label": {
+    "0": "prose",
+    "1": "speaker",
+    "2": "heading",
+    "3": "verse",
+    "4": "junk"
+  },
+  "label2id": {
+    "prose": "0",
+    "speaker": "1",
+    "heading": "2",
+    "verse": "3",
+    "junk": "4"
+  },
+  "num_labels": 5,
+  "vocab_size": 30522,
+  "max_position_embeddings": 512,
+  "hidden_size": 384,
+  "num_hidden_layers": 6,
+  "num_attention_heads": 12,
+  "intermediate_size": 1536,
+  "problem_type": "single_label_classification"
+}
